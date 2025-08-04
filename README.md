@@ -228,9 +228,9 @@ If you use this toolkit in your research, please cite:
 ```bibtex
 @software{liquid_vision_sim_kit,
   title = {Liquid Vision Sim-Kit: Neuromorphic Dataset Generation and Training for Edge Devices},
-  author = {Your Name},
+  author = {Daniel Schmidt},
   year = {2025},
-  url = {https://github.com/yourusername/liquid-vision-sim-kit}
+  url = {https://github.com/danieleschmidt/liquid-vision-sim-kit}
 }
 ```
 
