@@ -12,6 +12,7 @@ import json
 import tempfile
 
 from ..core.liquid_neurons import LiquidNet
+from .sensor_interface import SensorInterfaceGenerator, SensorType
 
 
 class DeploymentTarget(Enum):
@@ -549,8 +550,14 @@ void app_main() {{
     
     // Main inference loop
     while (1) {{
-        // TODO: Get input data from sensors
-        float input[INPUT_DIM] = {{0}};  // Placeholder
+        // Get input data from sensors
+        float input[INPUT_DIM];
+        int sensor_result = sensor_read_events(input, INPUT_DIM);
+        if (sensor_result != 0) {{
+            printf("Sensor read error: %d\\n", sensor_result);
+            vTaskDelay(pdMS_TO_TICKS(10));  // Wait 10ms before retry
+            continue;
+        }}
         float output[OUTPUT_DIM];
         
         // Run inference
@@ -588,8 +595,14 @@ int main() {{
     
     // Main inference loop
     while (1) {{
-        // TODO: Get input data from sensors
-        float input[INPUT_DIM] = {{0}};  // Placeholder
+        // Get input data from sensors
+        float input[INPUT_DIM];
+        int sensor_result = sensor_read_events(input, INPUT_DIM);
+        if (sensor_result != 0) {{
+            printf("Sensor read error: %d\\n", sensor_result);
+            vTaskDelay(pdMS_TO_TICKS(10));  // Wait 10ms before retry
+            continue;
+        }}
         float output[OUTPUT_DIM];
         
         // Run inference
