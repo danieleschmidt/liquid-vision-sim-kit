@@ -13,6 +13,7 @@ import tempfile
 
 from ..core.liquid_neurons import LiquidNet
 from .sensor_interface import SensorInterfaceGenerator, SensorType
+from .hardware_interface import HardwarePlatform, HardwareProfiler
 
 
 class DeploymentTarget(Enum):
@@ -296,6 +297,342 @@ static inline float activation_tanh(float x) {{
         flat_data = data.flatten()
         
         if data.ndim == 1:
+            array_def = f"static const {c_type} {name}[{data.shape[0]}] = {{\n"
+        else:
+            array_def = f"static const {c_type} {name}[{data.shape[0]}][{data.shape[1]}] = {{\n"
+        
+        # Format array data
+        if data.ndim == 1:
+            for i in range(0, len(flat_data), 8):  # 8 values per line
+                line = "    " + ", ".join(f"{x:.6f}" if dtype.startswith('float') else str(int(x)) 
+                                        for x in flat_data[i:i+8])
+                if i + 8 < len(flat_data):
+                    line += ","
+                array_def += line + "\n"
+        else:
+            for i in range(data.shape[0]):
+                array_def += "    {"
+                row_data = data[i, :]
+                for j in range(0, len(row_data), 8):
+                    line = ", ".join(f"{x:.6f}" if dtype.startswith('float') else str(int(x)) 
+                                   for x in row_data[j:j+8])
+                    array_def += line
+                    if j + 8 < len(row_data):
+                        array_def += ", "
+                array_def += "}"
+                if i < data.shape[0] - 1:
+                    array_def += ","
+                array_def += "\n"
+        
+        array_def += "};\n\n"
+        return array_def
+    
+    def _generate_forward_function(self, model_info: Dict, quantized_weights: Dict) -> str:
+        """Generate optimized forward pass function."""
+        code = """
+// Forward pass function
+int liquid_model_predict(const float* input, float* output) {
+    // Static arrays for hidden states (persistent across calls)
+    static float hidden_states[NUM_LAYERS][MAX_HIDDEN_SIZE];
+    static int initialized = 0;
+    
+    // Initialize hidden states on first call
+    if (!initialized) {
+        memset(hidden_states, 0, sizeof(hidden_states));
+        initialized = 1;
+    }
+    
+    const float dt = 1.0f;
+    const float tau = 10.0f;
+    const float leak = 0.1f;
+    
+    // Copy input to first hidden state
+    float current_input[MAX_HIDDEN_SIZE];
+    for (int i = 0; i < INPUT_DIM; i++) {
+        current_input[i] = input[i];
+    }
+    
+"""
+        
+        # Generate layer computations
+        for layer_idx in range(len(model_info['hidden_units'])):
+            hidden_size = model_info['hidden_units'][layer_idx]
+            input_size = model_info['input_dim'] if layer_idx == 0 else model_info['hidden_units'][layer_idx - 1]
+            
+            code += f"""
+    // Layer {layer_idx} computation
+    {{
+        float input_contrib[{hidden_size}] = {{0}};
+        float recurrent_contrib[{hidden_size}] = {{0}};
+        
+        // Input contribution: W_in * current_input
+        for (int i = 0; i < {hidden_size}; i++) {{
+            for (int j = 0; j < {input_size}; j++) {{"""
+            
+            # Handle quantization
+            if self.quantization == "int8":
+                code += f"""
+                input_contrib[i] += ((float)W_in_{layer_idx}[i][j] * W_in_{layer_idx}_scale) * current_input[j];"""
+            else:
+                code += f"""
+                input_contrib[i] += W_in_{layer_idx}[i][j] * current_input[j];"""
+            
+            code += f"""
+            }}
+            input_contrib[i] += bias_{layer_idx}[i];
+        }}
+        
+        // Recurrent contribution: W_rec * hidden_state
+        for (int i = 0; i < {hidden_size}; i++) {{
+            for (int j = 0; j < {hidden_size}; j++) {{"""
+            
+            if self.quantization == "int8":
+                code += f"""
+                recurrent_contrib[i] += ((float)W_rec_{layer_idx}[i][j] * W_rec_{layer_idx}_scale) * hidden_states[{layer_idx}][j];"""
+            else:
+                code += f"""
+                recurrent_contrib[i] += W_rec_{layer_idx}[i][j] * hidden_states[{layer_idx}][j];"""
+            
+            code += f"""
+            }}
+        }}
+        
+        // Liquid dynamics: dh/dt = (-h + tanh(input + recurrent)) / tau
+        for (int i = 0; i < {hidden_size}; i++) {{
+            float total_input = input_contrib[i] + recurrent_contrib[i];
+            float target_state = activation_tanh(total_input);
+            float dhdt = (-hidden_states[{layer_idx}][i] + target_state) / tau;
+            hidden_states[{layer_idx}][i] += dt * dhdt - leak * hidden_states[{layer_idx}][i];
+            current_input[i] = hidden_states[{layer_idx}][i];  // For next layer
+        }}
+    }}
+"""
+        
+        # Final readout layer
+        last_hidden_size = model_info['hidden_units'][-1]
+        code += f"""
+    // Final readout layer
+    for (int i = 0; i < OUTPUT_DIM; i++) {{
+        output[i] = 0;
+        for (int j = 0; j < {last_hidden_size}; j++) {{"""
+        
+        if self.quantization == "int8":
+            code += """
+            output[i] += ((float)W_out[i][j] * W_out_scale) * hidden_states[NUM_LAYERS-1][j];"""
+        else:
+            code += """
+            output[i] += W_out[i][j] * hidden_states[NUM_LAYERS-1][j];"""
+        
+        code += """
+        }
+    }
+    
+    return 0;  // Success
+}
+
+// Reset model state
+void liquid_model_reset(void) {
+    static float hidden_states[NUM_LAYERS][MAX_HIDDEN_SIZE];
+    memset(hidden_states, 0, sizeof(hidden_states));
+}
+"""
+        
+        return code
+    
+    def _generate_header_code(self, model_info: Dict) -> str:
+        """Generate C header file."""
+        header = f"""/*
+ * Liquid Neural Network - Header File
+ * Generated for target: {self.target.value}
+ */
+
+#ifndef LIQUID_MODEL_H
+#define LIQUID_MODEL_H
+
+#include <stdint.h>
+
+// Model dimensions
+#define INPUT_DIM {model_info['input_dim']}
+#define OUTPUT_DIM {model_info['output_dim']}
+#define NUM_LAYERS {len(model_info['hidden_units'])}
+#define MAX_HIDDEN_SIZE {max(model_info['hidden_units']) if model_info['hidden_units'] else 32}
+
+// Quantization scales (if applicable)
+"""
+        
+        if self.quantization == "int8":
+            header += """
+extern const float W_in_scales[NUM_LAYERS];
+extern const float W_rec_scales[NUM_LAYERS];
+extern const float W_out_scale;
+"""
+        
+        header += """
+// Function prototypes
+int liquid_model_predict(const float* input, float* output);
+void liquid_model_reset(void);
+
+// Platform-specific optimizations
+"""
+        
+        if self.target in [DeploymentTarget.ESP32, DeploymentTarget.ESP32_S3]:
+            header += """
+// ESP32 specific optimizations
+#define USE_ESP32_OPTIMIZATIONS 1
+#ifdef CONFIG_IDF_TARGET_ESP32S3
+#define USE_SPIRAM 1
+#endif
+"""
+        elif self.target in [DeploymentTarget.CORTEX_M4, DeploymentTarget.CORTEX_M7]:
+            header += """
+// ARM Cortex-M specific optimizations
+#define USE_ARM_MATH 1
+#ifdef ARM_MATH_CM4
+#define USE_DSP_INSTRUCTIONS 1
+#endif
+"""
+        
+        header += """
+#endif /* LIQUID_MODEL_H */
+"""
+        
+        return header
+    
+    def _generate_test_code(self, model_info: Dict, test_input: torch.Tensor) -> str:
+        """Generate test/validation code."""
+        test_data = test_input.detach().cpu().numpy().flatten()
+        
+        code = f"""/*
+ * Test code for Liquid Neural Network
+ */
+
+#include <stdio.h>
+#include <math.h>
+#include "liquid_model.h"
+
+// Test input data
+static const float test_input[INPUT_DIM] = {{
+"""
+        
+        # Format test input
+        for i in range(0, len(test_data), 8):
+            line = "    " + ", ".join(f"{x:.6f}f" for x in test_data[i:i+8])
+            if i + 8 < len(test_data):
+                line += ","
+            code += line + "\n"
+        
+        code += f"""
+}};
+
+int main(void) {{
+    float output[OUTPUT_DIM];
+    
+    printf("Liquid Neural Network Test\\n");
+    printf("Target: {self.target.value}\\n");
+    printf("Input dim: %d, Output dim: %d\\n", INPUT_DIM, OUTPUT_DIM);
+    
+    // Run inference
+    int result = liquid_model_predict(test_input, output);
+    
+    if (result == 0) {{
+        printf("Inference successful!\\n");
+        printf("Output: ");
+        for (int i = 0; i < OUTPUT_DIM; i++) {{
+            printf("%.6f ", output[i]);
+        }}
+        printf("\\n");
+    }} else {{
+        printf("Inference failed with code: %d\\n", result);
+        return 1;
+    }}
+    
+    return 0;
+}}
+"""
+        
+        return code
+    
+    def _generate_build_config(self, model_info: Dict) -> Dict[str, Any]:
+        """Generate build configuration."""
+        config = {
+            "target": self.target.value,
+            "compiler_flags": [],
+            "linker_flags": [],
+            "defines": {
+                "INPUT_DIM": model_info['input_dim'],
+                "OUTPUT_DIM": model_info['output_dim'],
+                "NUM_LAYERS": len(model_info['hidden_units']),
+                "MAX_HIDDEN_SIZE": max(model_info['hidden_units']) if model_info['hidden_units'] else 32
+            },
+            "optimization_level": "-O2",
+            "stack_size": 8192,
+            "heap_size": 16384
+        }
+        
+        # Platform-specific configurations
+        if self.target in [DeploymentTarget.ESP32, DeploymentTarget.ESP32_S3]:
+            config["compiler_flags"].extend([
+                "-ffunction-sections",
+                "-fdata-sections",
+                "-fstrict-volatile-bitfields"
+            ])
+            config["linker_flags"].extend([
+                "-Wl,--gc-sections",
+                "-Wl,--cref"
+            ])
+            config["idf_components"] = ["freertos", "esp_timer", "driver"]
+            
+        elif self.target in [DeploymentTarget.CORTEX_M4, DeploymentTarget.CORTEX_M7]:
+            config["compiler_flags"].extend([
+                "-mthumb",
+                "-mcpu=cortex-m4" if self.target == DeploymentTarget.CORTEX_M4 else "-mcpu=cortex-m7",
+                "-mfloat-abi=hard",
+                "-mfpu=fpv4-sp-d16" if self.target == DeploymentTarget.CORTEX_M4 else "-mfpu=fpv5-d16"
+            ])
+            config["linker_flags"].extend([
+                "-specs=nano.specs",
+                "-specs=nosys.specs"
+            ])
+            config["cmsis_version"] = "5.8.0"
+            
+        return config
+    
+    def _calculate_memory_usage(self, model_info: Dict, quantized_weights: Dict) -> Dict[str, float]:
+        """Calculate memory usage for the deployed model."""
+        memory_usage = {
+            "weights_kb": 0,
+            "states_kb": 0,
+            "stack_kb": 0,
+            "total_kb": 0
+        }
+        
+        # Calculate weight memory
+        for name, weight_info in quantized_weights.items():
+            data = weight_info["data"]
+            dtype = weight_info["dtype"]
+            
+            if dtype == "int8":
+                bytes_per_element = 1
+            elif dtype == "int16" or dtype == "float16":
+                bytes_per_element = 2
+            else:
+                bytes_per_element = 4
+                
+            weight_bytes = data.size * bytes_per_element
+            memory_usage["weights_kb"] += weight_bytes / 1024
+        
+        # Calculate state memory (hidden states persist between calls)
+        total_hidden_units = sum(model_info['hidden_units'])
+        memory_usage["states_kb"] = (total_hidden_units * 4) / 1024  # float32
+        
+        # Estimate stack usage
+        max_hidden_size = max(model_info['hidden_units']) if model_info['hidden_units'] else 32
+        temp_arrays = 3 * max_hidden_size * 4  # 3 temp arrays of max size
+        memory_usage["stack_kb"] = temp_arrays / 1024
+        
+        memory_usage["total_kb"] = sum(memory_usage[k] for k in ["weights_kb", "states_kb", "stack_kb"])
+        
+        return memory_usage
             size_str = f"[{len(flat_data)}]"
         else:
             size_str = f"[{data.shape[0]}][{data.shape[1]}]"

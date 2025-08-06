@@ -1,5 +1,6 @@
 """
-Advanced input sanitization for security hardening.
+Advanced input sanitization and security hardening for liquid neural networks.
+Comprehensive protection against various security threats and vulnerabilities.
 """
 
 import re
@@ -9,11 +10,21 @@ import html
 import urllib.parse
 import hashlib
 import base64
+import secrets
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Set
 import logging
+import torch
+import numpy as np
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-logger = logging.getLogger('liquid_vision.security')
+from ..utils.logging import get_logger
+from ..utils.error_handling import ValidationError, LiquidVisionError, ErrorCategory
+
+logger = get_logger(__name__)
 
 
 class SanitizationError(Exception):
@@ -477,5 +488,510 @@ def sanitize_decorator(input_type: str = "string", **sanitize_kwargs):
             
             return func(*sanitized_args, **sanitized_kwargs)
         
+        return wrapper
+    return decorator
+
+
+class SecureModelValidator:
+    """Comprehensive security validation for model inputs and outputs."""
+    
+    def __init__(self):
+        self.logger = get_logger(__name__)
+        self.threat_patterns = self._load_threat_patterns()
+        self.validation_cache = {}
+        self.validation_stats = {
+            'total_validations': 0,
+            'threats_detected': 0,
+            'cache_hits': 0
+        }
+    
+    def _load_threat_patterns(self) -> Dict[str, List[str]]:
+        """Load known threat patterns for detection."""
+        return {
+            'adversarial_indicators': [
+                'epsilon', 'perturbation', 'fgsm', 'pgd', 'carlini',
+                'deepfool', 'adversarial', 'attack', 'poison'
+            ],
+            'model_extraction': [
+                'query', 'extract', 'steal', 'replica', 'distill',
+                'membership_inference', 'model_inversion'
+            ],
+            'backdoor_indicators': [
+                'trigger', 'backdoor', 'trojan', 'poison', 'watermark'
+            ]
+        }
+    
+    def validate_tensor_input(self, tensor: torch.Tensor, context: str = "unknown") -> bool:
+        """
+        Validate tensor input for security threats.
+        
+        Args:
+            tensor: Input tensor to validate
+            context: Context description for logging
+            
+        Returns:
+            True if tensor is safe, raises exception if threats detected
+        """
+        self.validation_stats['total_validations'] += 1
+        
+        # Generate validation key for caching
+        tensor_hash = self._compute_tensor_hash(tensor)
+        cache_key = f"{tensor_hash}_{context}"
+        
+        if cache_key in self.validation_cache:
+            self.validation_stats['cache_hits'] += 1
+            return self.validation_cache[cache_key]
+        
+        try:
+            # Check for NaN/Inf attacks
+            self._check_numerical_stability(tensor, context)
+            
+            # Check for adversarial patterns
+            self._check_adversarial_patterns(tensor, context)
+            
+            # Check tensor properties
+            self._check_tensor_properties(tensor, context)
+            
+            # Check for unusual statistical properties
+            self._check_statistical_anomalies(tensor, context)
+            
+            # Cache successful validation
+            self.validation_cache[cache_key] = True
+            return True
+            
+        except ValidationError as e:
+            self.validation_stats['threats_detected'] += 1
+            self.logger.warning(f"Security threat detected in tensor input ({context}): {e}")
+            raise
+    
+    def _compute_tensor_hash(self, tensor: torch.Tensor) -> str:
+        """Compute hash of tensor for caching."""
+        # Use tensor statistics for hash to avoid memory issues
+        stats = torch.tensor([
+            tensor.mean().item(),
+            tensor.std().item(),
+            tensor.min().item(),
+            tensor.max().item(),
+            float(tensor.shape[0]) if tensor.numel() > 0 else 0
+        ])
+        return hashlib.md5(stats.numpy().tobytes()).hexdigest()[:16]
+    
+    def _check_numerical_stability(self, tensor: torch.Tensor, context: str):
+        """Check for numerical stability attacks."""
+        if torch.isnan(tensor).any():
+            raise ValidationError(
+                f"NaN values detected in {context}",
+                category=ErrorCategory.VALIDATION,
+                details={'nan_count': torch.isnan(tensor).sum().item()}
+            )
+        
+        if torch.isinf(tensor).any():
+            raise ValidationError(
+                f"Infinite values detected in {context}",
+                category=ErrorCategory.VALIDATION,
+                details={'inf_count': torch.isinf(tensor).sum().item()}
+            )
+        
+        # Check for extreme values that might cause overflow
+        max_val = tensor.max().abs().item()
+        if max_val > 1e6:
+            self.logger.warning(f"Extremely large values in tensor ({context}): max={max_val}")
+    
+    def _check_adversarial_patterns(self, tensor: torch.Tensor, context: str):
+        """Check for known adversarial attack patterns."""
+        # Check for uniform random noise (common in adversarial attacks)
+        if tensor.numel() > 100:  # Only check for reasonably sized tensors
+            tensor_flat = tensor.view(-1)
+            
+            # Check if values are suspiciously uniform
+            hist, _ = torch.histogram(tensor_flat, bins=50)
+            uniformity = hist.std() / (hist.mean() + 1e-8)
+            
+            if uniformity < 0.1 and tensor_flat.std() > 0.01:
+                self.logger.warning(f"Suspiciously uniform distribution in {context}")
+        
+        # Check for high-frequency noise patterns
+        if tensor.dim() >= 2 and tensor.shape[-1] > 8 and tensor.shape[-2] > 8:
+            # Compute high-frequency components using simple differences
+            diff_x = torch.diff(tensor, dim=-1).abs().mean()
+            diff_y = torch.diff(tensor, dim=-2).abs().mean()
+            
+            mean_val = tensor.abs().mean()
+            if mean_val > 0 and (diff_x / mean_val > 0.5 or diff_y / mean_val > 0.5):
+                self.logger.warning(f"High-frequency patterns detected in {context}")
+    
+    def _check_tensor_properties(self, tensor: torch.Tensor, context: str):
+        """Check basic tensor properties for anomalies."""
+        # Check tensor size limits
+        max_elements = 100_000_000  # 100M elements
+        if tensor.numel() > max_elements:
+            raise ValidationError(
+                f"Tensor too large in {context}: {tensor.numel()} > {max_elements}",
+                category=ErrorCategory.VALIDATION,
+                details={'tensor_shape': list(tensor.shape)}
+            )
+        
+        # Check for unusual tensor shapes
+        if tensor.dim() > 6:
+            self.logger.warning(f"Unusual tensor dimensionality in {context}: {tensor.dim()}D")
+        
+        # Check for very sparse tensors (might indicate crafted input)
+        if tensor.numel() > 1000:
+            zero_fraction = (tensor == 0).float().mean().item()
+            if zero_fraction > 0.99:
+                self.logger.warning(f"Extremely sparse tensor in {context}: {zero_fraction:.1%} zeros")
+    
+    def _check_statistical_anomalies(self, tensor: torch.Tensor, context: str):
+        """Check for statistical anomalies that might indicate attacks."""
+        if tensor.numel() < 10:
+            return  # Skip for very small tensors
+        
+        tensor_flat = tensor.view(-1)
+        
+        # Check for extreme statistical properties
+        mean_val = tensor_flat.mean().item()
+        std_val = tensor_flat.std().item()
+        
+        # Check for extreme skewness
+        if std_val > 1e-6:  # Avoid division by zero
+            centered = tensor_flat - mean_val
+            skewness = (centered ** 3).mean() / (std_val ** 3)
+            
+            if abs(skewness) > 10:
+                self.logger.warning(f"Extreme skewness in {context}: {skewness:.3f}")
+        
+        # Check for bimodal distributions (might indicate mixed legitimate/adversarial data)
+        if tensor.numel() > 1000:
+            # Simple bimodality check using Hartigan's dip test approximation
+            sorted_vals, _ = torch.sort(tensor_flat)
+            n = len(sorted_vals)
+            
+            # Check for gaps in the distribution
+            diffs = torch.diff(sorted_vals)
+            large_gaps = (diffs > 3 * diffs.median()).sum().item()
+            
+            if large_gaps > n * 0.05:  # More than 5% large gaps
+                self.logger.warning(f"Unusual distribution gaps in {context}")
+    
+    def validate_model_outputs(self, outputs: torch.Tensor, expected_shape: Optional[tuple] = None) -> bool:
+        """
+        Validate model outputs for security and correctness.
+        
+        Args:
+            outputs: Model output tensor
+            expected_shape: Expected output shape
+            
+        Returns:
+            True if outputs are valid
+        """
+        # Basic tensor validation
+        self.validate_tensor_input(outputs, "model_output")
+        
+        # Shape validation
+        if expected_shape and outputs.shape != expected_shape:
+            raise ValidationError(
+                f"Model output shape mismatch: expected {expected_shape}, got {outputs.shape}",
+                category=ErrorCategory.VALIDATION
+            )
+        
+        # Check for reasonable output ranges
+        if outputs.dtype.is_floating_point:
+            min_val, max_val = outputs.min().item(), outputs.max().item()
+            
+            # Check for extremely large outputs (potential overflow)
+            if max_val > 1e6 or min_val < -1e6:
+                self.logger.warning(f"Extreme output values: min={min_val:.3e}, max={max_val:.3e}")
+            
+            # Check for outputs stuck at extreme values (might indicate attack)
+            if outputs.numel() > 10:
+                extreme_fraction = ((outputs.abs() > 1e3).float().mean()).item()
+                if extreme_fraction > 0.9:
+                    self.logger.warning(f"Most outputs are extreme values: {extreme_fraction:.1%}")
+        
+        return True
+    
+    def get_validation_stats(self) -> Dict[str, Any]:
+        """Get validation statistics."""
+        return {
+            **self.validation_stats,
+            'cache_size': len(self.validation_cache),
+            'threat_detection_rate': (
+                self.validation_stats['threats_detected'] / 
+                max(1, self.validation_stats['total_validations'])
+            ),
+            'cache_hit_rate': (
+                self.validation_stats['cache_hits'] / 
+                max(1, self.validation_stats['total_validations'])
+            )
+        }
+    
+    def clear_cache(self):
+        """Clear validation cache."""
+        self.validation_cache.clear()
+
+
+class SecureDataEncryption:
+    """Encryption utilities for secure data handling."""
+    
+    def __init__(self, password: Optional[str] = None):
+        self.logger = get_logger(__name__)
+        if password:
+            self.key = self._derive_key_from_password(password)
+        else:
+            self.key = Fernet.generate_key()
+        self.cipher = Fernet(self.key)
+    
+    def _derive_key_from_password(self, password: str, salt: Optional[bytes] = None) -> bytes:
+        """Derive encryption key from password."""
+        if salt is None:
+            salt = b'liquid_vision_salt_2023'  # Use consistent salt for reproducibility
+        
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=100000,
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
+        return key
+    
+    def encrypt_data(self, data: Union[str, bytes, Dict, torch.Tensor]) -> bytes:
+        """
+        Encrypt various types of data.
+        
+        Args:
+            data: Data to encrypt
+            
+        Returns:
+            Encrypted data as bytes
+        """
+        try:
+            # Convert different data types to bytes
+            if isinstance(data, str):
+                data_bytes = data.encode('utf-8')
+            elif isinstance(data, bytes):
+                data_bytes = data
+            elif isinstance(data, dict):
+                data_bytes = json.dumps(data).encode('utf-8')
+            elif isinstance(data, torch.Tensor):
+                data_bytes = data.detach().cpu().numpy().tobytes()
+            else:
+                # Convert to string first
+                data_bytes = str(data).encode('utf-8')
+            
+            # Encrypt the data
+            encrypted_data = self.cipher.encrypt(data_bytes)
+            return encrypted_data
+            
+        except Exception as e:
+            self.logger.error(f"Encryption failed: {e}")
+            raise LiquidVisionError(
+                f"Failed to encrypt data: {e}",
+                category=ErrorCategory.CONFIGURATION
+            )
+    
+    def decrypt_data(self, encrypted_data: bytes, data_type: str = "string") -> Any:
+        """
+        Decrypt data and convert back to specified type.
+        
+        Args:
+            encrypted_data: Encrypted data bytes
+            data_type: Expected data type (string, bytes, dict, tensor)
+            
+        Returns:
+            Decrypted data in specified format
+        """
+        try:
+            # Decrypt the data
+            decrypted_bytes = self.cipher.decrypt(encrypted_data)
+            
+            # Convert back to requested type
+            if data_type == "string":
+                return decrypted_bytes.decode('utf-8')
+            elif data_type == "bytes":
+                return decrypted_bytes
+            elif data_type == "dict":
+                return json.loads(decrypted_bytes.decode('utf-8'))
+            elif data_type == "tensor":
+                # This would need shape information to reconstruct properly
+                return torch.from_numpy(np.frombuffer(decrypted_bytes, dtype=np.float32))
+            else:
+                return decrypted_bytes.decode('utf-8')
+                
+        except Exception as e:
+            self.logger.error(f"Decryption failed: {e}")
+            raise LiquidVisionError(
+                f"Failed to decrypt data: {e}",
+                category=ErrorCategory.CONFIGURATION
+            )
+    
+    def encrypt_model_weights(self, model: torch.nn.Module) -> Dict[str, bytes]:
+        """
+        Encrypt model weights for secure storage.
+        
+        Args:
+            model: PyTorch model
+            
+        Returns:
+            Dictionary of encrypted weight data
+        """
+        encrypted_weights = {}
+        
+        try:
+            for name, param in model.state_dict().items():
+                # Convert parameter to bytes
+                param_bytes = param.detach().cpu().numpy().tobytes()
+                
+                # Add shape and dtype metadata
+                metadata = {
+                    'shape': list(param.shape),
+                    'dtype': str(param.dtype),
+                    'data': param_bytes.hex()  # Convert to hex for JSON serialization
+                }
+                
+                # Encrypt the metadata
+                encrypted_weights[name] = self.encrypt_data(metadata)
+            
+            self.logger.info(f"Encrypted {len(encrypted_weights)} model parameters")
+            return encrypted_weights
+            
+        except Exception as e:
+            self.logger.error(f"Model weight encryption failed: {e}")
+            raise LiquidVisionError(
+                f"Failed to encrypt model weights: {e}",
+                category=ErrorCategory.CONFIGURATION
+            )
+    
+    def decrypt_model_weights(self, encrypted_weights: Dict[str, bytes]) -> Dict[str, torch.Tensor]:
+        """
+        Decrypt model weights for loading.
+        
+        Args:
+            encrypted_weights: Dictionary of encrypted weight data
+            
+        Returns:
+            Dictionary of decrypted tensors
+        """
+        decrypted_weights = {}
+        
+        try:
+            for name, encrypted_data in encrypted_weights.items():
+                # Decrypt metadata
+                metadata = self.decrypt_data(encrypted_data, "dict")
+                
+                # Reconstruct tensor
+                shape = metadata['shape']
+                dtype_str = metadata['dtype']
+                data_hex = metadata['data']
+                
+                # Convert hex back to bytes
+                param_bytes = bytes.fromhex(data_hex)
+                
+                # Reconstruct numpy array
+                param_np = np.frombuffer(param_bytes, dtype=np.float32).reshape(shape)
+                
+                # Convert to tensor with correct dtype
+                if 'float' in dtype_str:
+                    tensor = torch.from_numpy(param_np.astype(np.float32))
+                else:
+                    tensor = torch.from_numpy(param_np)
+                
+                decrypted_weights[name] = tensor
+            
+            self.logger.info(f"Decrypted {len(decrypted_weights)} model parameters")
+            return decrypted_weights
+            
+        except Exception as e:
+            self.logger.error(f"Model weight decryption failed: {e}")
+            raise LiquidVisionError(
+                f"Failed to decrypt model weights: {e}",
+                category=ErrorCategory.CONFIGURATION
+            )
+
+
+class RateLimiter:
+    """Rate limiting for API endpoints and resource access."""
+    
+    def __init__(self, max_requests: int = 100, time_window: int = 3600):
+        self.max_requests = max_requests
+        self.time_window = time_window  # seconds
+        self.requests = defaultdict(deque)
+        self.logger = get_logger(__name__)
+    
+    def is_allowed(self, identifier: str) -> bool:
+        """
+        Check if request is allowed under rate limit.
+        
+        Args:
+            identifier: Unique identifier for the client/request
+            
+        Returns:
+            True if request is allowed, False if rate limited
+        """
+        now = time.time()
+        client_requests = self.requests[identifier]
+        
+        # Remove old requests outside time window
+        while client_requests and now - client_requests[0] > self.time_window:
+            client_requests.popleft()
+        
+        # Check if under limit
+        if len(client_requests) >= self.max_requests:
+            self.logger.warning(f"Rate limit exceeded for {identifier}")
+            return False
+        
+        # Add current request
+        client_requests.append(now)
+        return True
+    
+    def get_remaining_requests(self, identifier: str) -> int:
+        """Get remaining requests for identifier."""
+        now = time.time()
+        client_requests = self.requests[identifier]
+        
+        # Clean old requests
+        while client_requests and now - client_requests[0] > self.time_window:
+            client_requests.popleft()
+        
+        return max(0, self.max_requests - len(client_requests))
+    
+    def reset_client(self, identifier: str):
+        """Reset rate limit for specific client."""
+        self.requests[identifier].clear()
+
+
+def create_security_suite() -> Dict[str, Any]:
+    """Create comprehensive security suite."""
+    return {
+        'input_sanitizer': InputSanitizer(strict_mode=True),
+        'model_validator': SecureModelValidator(),
+        'data_encryption': SecureDataEncryption(),
+        'rate_limiter': RateLimiter(),
+        'threat_patterns': SecureModelValidator()._load_threat_patterns()
+    }
+
+
+# Security decorators
+def secure_input(input_type: str = "string", **kwargs):
+    """Decorator for automatic input sanitization."""
+    return sanitize_decorator(input_type, **kwargs)
+
+
+def rate_limited(max_requests: int = 100, time_window: int = 3600):
+    """Decorator for rate limiting function calls."""
+    limiter = RateLimiter(max_requests, time_window)
+    
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            # Use function name as identifier (could be enhanced with user context)
+            identifier = f"{func.__module__}.{func.__name__}"
+            
+            if not limiter.is_allowed(identifier):
+                raise LiquidVisionError(
+                    f"Rate limit exceeded for {func.__name__}",
+                    category=ErrorCategory.VALIDATION
+                )
+            
+            return func(*args, **kwargs)
         return wrapper
     return decorator
