@@ -384,6 +384,257 @@ class AdaptiveEncoder(EventEncoder):
         return surface
 
 
+class VoxelEncoder(EventEncoder):
+    """
+    Voxel grid encoding that discretizes events in 3D space-time volumes,
+    commonly used in event-based optical flow and object recognition.
+    """
+    
+    def __init__(
+        self,
+        sensor_size: Tuple[int, int] = (640, 480),
+        time_window: float = 50.0,
+        voxel_grid: Tuple[int, int, int] = (32, 24, 5),  # (W, H, T)
+        normalize: bool = True,
+        **kwargs
+    ):
+        super().__init__(sensor_size, time_window, **kwargs)
+        
+        self.voxel_grid = voxel_grid
+        self.normalize = normalize
+        
+        # Compute voxel scaling factors
+        self.x_scale = voxel_grid[0] / sensor_size[0]
+        self.y_scale = voxel_grid[1] / sensor_size[1]
+        self.t_scale = voxel_grid[2] / time_window
+        
+    def forward(self, events: torch.Tensor) -> torch.Tensor:
+        """
+        Create voxel grid representation of events.
+        
+        Args:
+            events: Event tensor [N, 4] with columns [x, y, t, polarity]
+            
+        Returns:
+            Voxel grid [2, T, H, W] for positive/negative events
+        """
+        if events.numel() == 0:
+            return torch.zeros(2, self.voxel_grid[2], self.voxel_grid[1], self.voxel_grid[0])
+            
+        # Extract event components
+        x_coords = events[:, 0]
+        y_coords = events[:, 1]
+        timestamps = events[:, 2]
+        polarities = events[:, 3]
+        
+        # Normalize timestamps to [0, time_window]
+        if timestamps.numel() > 1:
+            t_min, t_max = timestamps.min(), timestamps.max()
+            if t_max > t_min:
+                timestamps = (timestamps - t_min) / (t_max - t_min) * self.time_window
+        
+        # Convert to voxel coordinates
+        x_voxels = torch.clamp((x_coords * self.x_scale).long(), 0, self.voxel_grid[0] - 1)
+        y_voxels = torch.clamp((y_coords * self.y_scale).long(), 0, self.voxel_grid[1] - 1)
+        t_voxels = torch.clamp((timestamps * self.t_scale).long(), 0, self.voxel_grid[2] - 1)
+        
+        # Create voxel grids for both polarities
+        voxel_grids = torch.zeros(2, self.voxel_grid[2], self.voxel_grid[1], self.voxel_grid[0])
+        
+        # Positive events
+        pos_mask = polarities > 0
+        if pos_mask.any():
+            pos_x, pos_y, pos_t = x_voxels[pos_mask], y_voxels[pos_mask], t_voxels[pos_mask]
+            voxel_grids[0, pos_t, pos_y, pos_x] += 1.0
+            
+        # Negative events  
+        neg_mask = polarities <= 0
+        if neg_mask.any():
+            neg_x, neg_y, neg_t = x_voxels[neg_mask], y_voxels[neg_mask], t_voxels[neg_mask]
+            voxel_grids[1, neg_t, neg_y, neg_x] += 1.0
+            
+        if self.normalize and voxel_grids.sum() > 0:
+            voxel_grids = voxel_grids / voxel_grids.sum()
+            
+        return voxel_grids
+
+
+class SAEEncoder(EventEncoder):
+    """
+    Surface of Active Events (SAE) encoding that maintains the most recent
+    timestamp for each pixel, creating motion-sensitive representations.
+    """
+    
+    def __init__(
+        self,
+        sensor_size: Tuple[int, int] = (640, 480),
+        time_window: float = 50.0,
+        mixed_polarity: bool = False,
+        **kwargs
+    ):
+        super().__init__(sensor_size, time_window, **kwargs)
+        
+        self.mixed_polarity = mixed_polarity
+        
+        # Initialize SAE surfaces
+        if mixed_polarity:
+            # Single channel with polarity encoded as sign
+            self.register_buffer('sae_surface', torch.zeros(1, sensor_size[1], sensor_size[0]))
+        else:
+            # Separate channels for each polarity
+            self.register_buffer('sae_surface', torch.zeros(2, sensor_size[1], sensor_size[0]))
+            
+    def forward(self, events: torch.Tensor) -> torch.Tensor:
+        """
+        Update SAE surface with most recent timestamps.
+        
+        Args:
+            events: Event tensor [N, 4] with columns [x, y, t, polarity]
+            
+        Returns:
+            SAE surface [1 or 2, height, width] with recent timestamps
+        """
+        if events.numel() == 0:
+            return self.sae_surface.clone()
+            
+        # Extract event components
+        x_coords = events[:, 0].long()
+        y_coords = events[:, 1].long()  
+        timestamps = events[:, 2]
+        polarities = events[:, 3]
+        
+        # Filter valid coordinates
+        valid_mask = (
+            (x_coords >= 0) & (x_coords < self.sensor_size[0]) &
+            (y_coords >= 0) & (y_coords < self.sensor_size[1])
+        )
+        
+        if not valid_mask.any():
+            return self.sae_surface.clone()
+            
+        x_coords = x_coords[valid_mask]
+        y_coords = y_coords[valid_mask]
+        timestamps = timestamps[valid_mask]
+        polarities = polarities[valid_mask]
+        
+        if self.mixed_polarity:
+            # Single channel with polarity as sign of timestamp
+            self.sae_surface[0, y_coords, x_coords] = timestamps * polarities.sign()
+        else:
+            # Separate channels for each polarity
+            pos_mask = polarities > 0
+            neg_mask = polarities <= 0
+            
+            if pos_mask.any():
+                self.sae_surface[0, y_coords[pos_mask], x_coords[pos_mask]] = timestamps[pos_mask]
+            if neg_mask.any():
+                self.sae_surface[1, y_coords[neg_mask], x_coords[neg_mask]] = timestamps[neg_mask]
+                
+        return self.sae_surface.clone()
+        
+    def reset(self) -> None:
+        """Reset SAE surface."""
+        self.sae_surface.zero_()
+
+
+class EventImageEncoder(EventEncoder):
+    """
+    Event image encoding that accumulates events into traditional image-like
+    representations for compatibility with CNN architectures.
+    """
+    
+    def __init__(
+        self,
+        sensor_size: Tuple[int, int] = (640, 480),
+        time_window: float = 50.0,
+        accumulation_mode: str = "count",  # "count", "binary", "exponential"
+        decay_rate: float = 0.1,
+        **kwargs
+    ):
+        super().__init__(sensor_size, time_window, **kwargs)
+        
+        self.accumulation_mode = accumulation_mode
+        self.decay_rate = decay_rate
+        
+        # Initialize event image
+        self.register_buffer('event_image', torch.zeros(2, sensor_size[1], sensor_size[0]))
+        self.register_buffer('last_update', torch.tensor(0.0))
+        
+    def forward(self, events: torch.Tensor) -> torch.Tensor:
+        """
+        Accumulate events into image representation.
+        
+        Args:
+            events: Event tensor [N, 4] with columns [x, y, t, polarity]
+            
+        Returns:
+            Event image [2, height, width]
+        """
+        if events.numel() == 0:
+            return self.event_image.clone()
+            
+        # Extract event components
+        x_coords = events[:, 0].long()
+        y_coords = events[:, 1].long()
+        timestamps = events[:, 2]
+        polarities = events[:, 3]
+        
+        # Filter valid coordinates
+        valid_mask = (
+            (x_coords >= 0) & (x_coords < self.sensor_size[0]) &
+            (y_coords >= 0) & (y_coords < self.sensor_size[1])
+        )
+        
+        if not valid_mask.any():
+            return self.event_image.clone()
+            
+        x_coords = x_coords[valid_mask]
+        y_coords = y_coords[valid_mask]
+        timestamps = timestamps[valid_mask]
+        polarities = polarities[valid_mask]
+        
+        # Apply temporal decay if using exponential mode
+        if self.accumulation_mode == "exponential":
+            current_time = timestamps.max()
+            dt = current_time - self.last_update
+            if dt > 0:
+                decay_factor = torch.exp(-dt * self.decay_rate)
+                self.event_image *= decay_factor
+                self.last_update = current_time
+        
+        # Accumulate events
+        pos_mask = polarities > 0
+        neg_mask = polarities <= 0
+        
+        if self.accumulation_mode == "count":
+            # Count-based accumulation
+            if pos_mask.any():
+                self.event_image[0, y_coords[pos_mask], x_coords[pos_mask]] += 1.0
+            if neg_mask.any():
+                self.event_image[1, y_coords[neg_mask], x_coords[neg_mask]] += 1.0
+        elif self.accumulation_mode == "binary":
+            # Binary accumulation  
+            if pos_mask.any():
+                self.event_image[0, y_coords[pos_mask], x_coords[pos_mask]] = 1.0
+            if neg_mask.any():
+                self.event_image[1, y_coords[neg_mask], x_coords[neg_mask]] = 1.0
+        elif self.accumulation_mode == "exponential":
+            # Exponential accumulation with timestamps as weights
+            if pos_mask.any():
+                weights = torch.exp(timestamps[pos_mask] * self.decay_rate)
+                self.event_image[0, y_coords[pos_mask], x_coords[pos_mask]] += weights
+            if neg_mask.any():
+                weights = torch.exp(timestamps[neg_mask] * self.decay_rate)
+                self.event_image[1, y_coords[neg_mask], x_coords[neg_mask]] += weights
+                
+        return self.event_image.clone()
+        
+    def reset(self) -> None:
+        """Reset event image and timestamp."""
+        self.event_image.zero_()
+        self.last_update.zero_()
+
+
 def create_encoder(
     encoding_type: str,
     sensor_size: Tuple[int, int] = (640, 480),
@@ -393,7 +644,8 @@ def create_encoder(
     Factory function to create event encoders.
     
     Args:
-        encoding_type: Type of encoder ("temporal", "spatial", "timeslice", "adaptive")
+        encoding_type: Type of encoder ("temporal", "spatial", "timeslice", "adaptive", 
+                      "voxel", "sae", "event_image")
         sensor_size: Camera sensor dimensions
         **kwargs: Additional encoder-specific arguments
         
@@ -405,6 +657,9 @@ def create_encoder(
         "spatial": SpatialEncoder,
         "timeslice": TimeSliceEncoder,
         "adaptive": AdaptiveEncoder,
+        "voxel": VoxelEncoder,
+        "sae": SAEEncoder,
+        "event_image": EventImageEncoder,
     }
     
     if encoding_type not in encoders:

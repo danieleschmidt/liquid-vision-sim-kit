@@ -15,6 +15,8 @@ from .core.liquid_neurons import create_liquid_net, get_model_info
 from .simulation import create_simulator, SceneGenerator
 from .training import LiquidTrainer, TrainingConfig
 from .training.event_dataloader import SyntheticEventDataset, EventDataLoader
+from .config import ConfigManager, TrainingConfig as AdvancedTrainingConfig, DeploymentConfig, SimulationConfig
+from .config.defaults import get_preset_config, list_presets
 
 
 def cmd_info(args):
@@ -81,7 +83,41 @@ def cmd_train(args):
     
     # Create dataset
     if args.data:
-        raise NotImplementedError("Custom data loading not yet implemented")
+        # Load custom data
+        data_path = Path(args.data)
+        if not data_path.exists():
+            raise FileNotFoundError(f"Data path not found: {data_path}")
+            
+        if data_path.suffix.lower() == '.h5':
+            # Load HDF5 dataset
+            import h5py
+            with h5py.File(data_path, 'r') as f:
+                events_data = f['events'][:]
+                labels_data = f.get('labels', None)
+                
+            # Create custom dataset
+            from .training.custom_dataset import CustomEventDataset
+            dataset = CustomEventDataset(
+                events_data,
+                labels_data,
+                encoder_type=args.encoder,
+                resolution=args.resolution
+            )
+        elif data_path.suffix.lower() in ['.npz', '.npy']:
+            # Load NumPy dataset
+            data = np.load(data_path, allow_pickle=True)
+            events_data = data['events'] if 'events' in data else data
+            labels_data = data.get('labels', None)
+            
+            from .training.custom_dataset import CustomEventDataset
+            dataset = CustomEventDataset(
+                events_data,
+                labels_data,
+                encoder_type=args.encoder,
+                resolution=args.resolution
+            )
+        else:
+            raise ValueError(f"Unsupported data format: {data_path.suffix}")
     else:
         # Use synthetic data
         dataset = SyntheticEventDataset(
@@ -182,6 +218,153 @@ def cmd_model_info(args):
               f"(τ={layer_info['tau']:.1f}, {layer_info['parameters']} params)")
 
 
+def cmd_config(args):
+    """Configuration management commands."""
+    config_manager = ConfigManager(args.config_dir)
+    
+    if args.config_action == "list":
+        # List available configurations
+        configs = config_manager.list_configs()
+        if configs:
+            print("Loaded configurations:")
+            for config_type in configs:
+                print(f"  - {config_type}")
+        else:
+            print("No configurations loaded.")
+            
+    elif args.config_action == "show":
+        # Show configuration details
+        if args.config_type:
+            config = config_manager.get_config(args.config_type)
+            if config:
+                print(f"{args.config_type.title()} Configuration:")
+                print("=" * 40)
+                if args.format == "yaml":
+                    print(config.to_yaml())
+                else:
+                    print(config.to_json())
+            else:
+                print(f"Configuration '{args.config_type}' not loaded.")
+        else:
+            print("Please specify --type for configuration to show")
+            
+    elif args.config_action == "validate":
+        # Validate all configurations
+        results = config_manager.validate_all_configs()
+        all_valid = all(results.values())
+        
+        print("Configuration Validation Results:")
+        print("=" * 40)
+        for config_type, is_valid in results.items():
+            status = "✅ Valid" if is_valid else "❌ Invalid"
+            print(f"{config_type}: {status}")
+        
+        if not all_valid:
+            sys.exit(1)
+            
+    elif args.config_action == "preset":
+        # Apply preset configuration
+        if args.preset_name:
+            try:
+                # Show available presets
+                if args.preset_name == "list":
+                    presets = list_presets()
+                    print("Available Configuration Presets:")
+                    print("=" * 40)
+                    for preset_name, config_types in presets.items():
+                        print(f"{preset_name}:")
+                        for config_type in config_types:
+                            print(f"  - {config_type}")
+                        print()
+                else:
+                    # Apply specific preset
+                    config_type = args.config_type or "training"
+                    preset_config = get_preset_config(args.preset_name, config_type)
+                    
+                    # Save to file
+                    output_file = Path(args.output or f"{config_type}_preset_{args.preset_name}.yaml")
+                    
+                    config_classes = {
+                        "training": AdvancedTrainingConfig,
+                        "deployment": DeploymentConfig,
+                        "simulation": SimulationConfig
+                    }
+                    
+                    config_class = config_classes[config_type]
+                    config = config_class.from_dict(preset_config)
+                    config.save(output_file)
+                    
+                    print(f"Applied preset '{args.preset_name}' to {output_file}")
+                    
+            except KeyError as e:
+                print(f"Error: {e}")
+                sys.exit(1)
+        else:
+            print("Please specify preset name (or 'list' to show available presets)")
+
+
+def cmd_profile(args):
+    """Configuration profile management."""
+    config_manager = ConfigManager(args.config_dir)
+    
+    if args.profile_action == "create":
+        if not args.profile_name:
+            print("Please specify --name for profile to create")
+            sys.exit(1)
+            
+        # Load configurations to include in profile
+        configs = {}
+        
+        # Load training config if specified
+        if args.training_config:
+            training_config = AdvancedTrainingConfig.from_file(args.training_config)
+            configs["training"] = training_config
+            
+        # Load deployment config if specified  
+        if args.deployment_config:
+            deployment_config = DeploymentConfig.from_file(args.deployment_config)
+            configs["deployment"] = deployment_config
+            
+        # Load simulation config if specified
+        if args.simulation_config:
+            simulation_config = SimulationConfig.from_file(args.simulation_config)
+            configs["simulation"] = simulation_config
+        
+        if not configs:
+            print("Please specify at least one configuration file to include in profile")
+            sys.exit(1)
+            
+        config_manager.create_profile(args.profile_name, configs)
+        print(f"Created profile '{args.profile_name}' with {len(configs)} configurations")
+        
+    elif args.profile_action == "load":
+        if not args.profile_name:
+            print("Please specify --name for profile to load")
+            sys.exit(1)
+            
+        try:
+            configs = config_manager.load_profile(args.profile_name)
+            print(f"Loaded profile '{args.profile_name}' with configurations:")
+            for config_type in configs:
+                print(f"  - {config_type}")
+        except FileNotFoundError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+            
+    elif args.profile_action == "list":
+        profiles_dir = Path(config_manager.config_dir) / "profiles"
+        if profiles_dir.exists():
+            profiles = [p.name for p in profiles_dir.iterdir() if p.is_dir()]
+            if profiles:
+                print("Available configuration profiles:")
+                for profile in sorted(profiles):
+                    print(f"  - {profile}")
+            else:
+                print("No configuration profiles found.")
+        else:
+            print("No configuration profiles directory found.")
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -250,6 +433,58 @@ Examples:
     model_parser.add_argument("--input-dim", type=int, default=1000, help="Input dimension")
     model_parser.add_argument("--output-dim", type=int, default=10, help="Output dimension")
     model_parser.set_defaults(func=cmd_model_info)
+    
+    # Configuration management command
+    config_parser = subparsers.add_parser("config", help="Configuration management")
+    config_parser.add_argument("--config-dir", default=".", help="Configuration directory")
+    config_subparsers = config_parser.add_subparsers(dest="config_action", help="Configuration actions")
+    
+    # List configurations
+    list_parser = config_subparsers.add_parser("list", help="List available configurations")
+    
+    # Show configuration
+    show_parser = config_subparsers.add_parser("show", help="Show configuration details")
+    show_parser.add_argument("--type", dest="config_type", 
+                            choices=["training", "deployment", "simulation"],
+                            help="Configuration type to show")
+    show_parser.add_argument("--format", choices=["json", "yaml"], default="yaml",
+                            help="Output format")
+    
+    # Validate configurations
+    validate_parser = config_subparsers.add_parser("validate", help="Validate all configurations")
+    
+    # Preset configurations
+    preset_parser = config_subparsers.add_parser("preset", help="Apply preset configurations")
+    preset_parser.add_argument("preset_name", help="Preset name (or 'list' to show available)")
+    preset_parser.add_argument("--type", dest="config_type",
+                              choices=["training", "deployment", "simulation"],
+                              help="Configuration type")
+    preset_parser.add_argument("--output", help="Output file path")
+    
+    config_parser.set_defaults(func=cmd_config)
+    
+    # Profile management command
+    profile_parser = subparsers.add_parser("profile", help="Configuration profile management")
+    profile_parser.add_argument("--config-dir", default=".", help="Configuration directory")
+    profile_subparsers = profile_parser.add_subparsers(dest="profile_action", help="Profile actions")
+    
+    # Create profile
+    create_profile_parser = profile_subparsers.add_parser("create", help="Create configuration profile")
+    create_profile_parser.add_argument("--name", dest="profile_name", required=True,
+                                      help="Profile name")
+    create_profile_parser.add_argument("--training-config", help="Training configuration file")
+    create_profile_parser.add_argument("--deployment-config", help="Deployment configuration file")  
+    create_profile_parser.add_argument("--simulation-config", help="Simulation configuration file")
+    
+    # Load profile
+    load_profile_parser = profile_subparsers.add_parser("load", help="Load configuration profile")
+    load_profile_parser.add_argument("--name", dest="profile_name", required=True,
+                                    help="Profile name")
+    
+    # List profiles
+    list_profiles_parser = profile_subparsers.add_parser("list", help="List available profiles")
+    
+    profile_parser.set_defaults(func=cmd_profile)
     
     # Parse arguments
     args = parser.parse_args()

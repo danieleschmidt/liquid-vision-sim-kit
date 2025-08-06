@@ -8,6 +8,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple, Callable, Any
 import math
+import logging
+
+from ..utils.logging import log_exceptions, log_performance
+from ..utils.validation import validate_inputs, ValidationError
 
 
 # Global registry for custom neuron types
