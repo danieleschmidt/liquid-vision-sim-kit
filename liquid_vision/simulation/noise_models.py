@@ -4,17 +4,18 @@ Implements various noise sources found in real neuromorphic sensors.
 """
 
 import numpy as np
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, TYPE_CHECKING
 from abc import ABC, abstractmethod
 
-from .event_simulator import EventData
+if TYPE_CHECKING:
+    from .event_simulator import EventData
 
 
 class NoiseModel(ABC):
     """Base class for event camera noise models."""
     
     @abstractmethod
-    def apply(self, events: EventData, timestamp: float) -> EventData:
+    def apply(self, events: "EventData", timestamp: float) -> "EventData":
         """
         Apply noise to event data.
         
@@ -42,7 +43,7 @@ class ShotNoise(NoiseModel):
         self.rate = rate
         self.sensor_size = sensor_size
         
-    def apply(self, events: EventData, timestamp: float) -> EventData:
+    def apply(self, events: "EventData", timestamp: float) -> "EventData":
         """Add shot noise events."""
         # Calculate expected number of noise events
         total_pixels = self.sensor_size[0] * self.sensor_size[1]
@@ -66,6 +67,8 @@ class ShotNoise(NoiseModel):
         combined_t = np.concatenate([events.t, noise_t])
         combined_p = np.concatenate([events.p, noise_p])
         
+        # Import EventData dynamically to avoid circular imports
+        from .event_simulator import EventData
         return EventData(
             x=combined_x,
             y=combined_y,
@@ -94,7 +97,7 @@ class ThermalNoise(NoiseModel):
         self.temperature_coefficient = temperature_coefficient
         self.sensor_size = sensor_size
         
-    def apply(self, events: EventData, timestamp: float) -> EventData:
+    def apply(self, events: "EventData", timestamp: float) -> "EventData":
         """Add temperature-dependent thermal noise."""
         # Calculate temperature-adjusted rate
         temp_diff = self.temperature - self.reference_temp
@@ -120,6 +123,8 @@ class ThermalNoise(NoiseModel):
         combined_t = np.concatenate([events.t, noise_t])
         combined_p = np.concatenate([events.p, noise_p])
         
+        # Import EventData dynamically to avoid circular imports
+        from .event_simulator import EventData
         return EventData(
             x=combined_x,
             y=combined_y,
@@ -142,7 +147,7 @@ class RefractoryNoise(NoiseModel):
         self.violation_rate = violation_rate
         self.refractory_period = refractory_period
         
-    def apply(self, events: EventData, timestamp: float) -> EventData:
+    def apply(self, events: "EventData", timestamp: float) -> "EventData":
         """Add refractory period violations."""
         if len(events) == 0:
             return events
@@ -174,6 +179,8 @@ class RefractoryNoise(NoiseModel):
         combined_t = np.concatenate([events.t, violation_t])
         combined_p = np.concatenate([events.p, violation_p])
         
+        # Import EventData dynamically to avoid circular imports
+        from .event_simulator import EventData
         return EventData(
             x=combined_x,
             y=combined_y,
@@ -196,7 +203,7 @@ class TimestampJitter(NoiseModel):
         self.jitter_std = jitter_std
         self.max_jitter = max_jitter
         
-    def apply(self, events: EventData, timestamp: float) -> EventData:
+    def apply(self, events: "EventData", timestamp: float) -> "EventData":
         """Add timestamp jitter."""
         if len(events) == 0:
             return events
@@ -248,7 +255,7 @@ class PixelMismatch(NoiseModel):
         if seed is not None:
             np.random.seed(None)
             
-    def apply(self, events: EventData, timestamp: float) -> EventData:
+    def apply(self, events: "EventData", timestamp: float) -> "EventData":
         """Apply pixel mismatch effects."""
         if len(events) == 0:
             return events
@@ -324,7 +331,7 @@ class CompositeNoise(NoiseModel):
     def __init__(self, noise_models: list):
         self.noise_models = noise_models
         
-    def apply(self, events: EventData, timestamp: float) -> EventData:
+    def apply(self, events: "EventData", timestamp: float) -> "EventData":
         """Apply all noise models sequentially."""
         current_events = events
         

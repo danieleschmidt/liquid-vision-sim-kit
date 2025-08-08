@@ -1,0 +1,27 @@
+# Core ML dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.21.0
+scipy>=1.9.0
+
+# Scientific computing
+h5py>=3.7.0
+matplotlib>=3.5.0
+opencv-python>=4.6.0
+
+# Event processing
+tonic>=1.0.8
+
+# Neural ODEs
+torchdiffeq>=0.2.0
+
+# Hardware interface
+pyserial>=3.5
+psutil>=5.9.0
+
+# Quantization
+torch-audiomentations>=0.11.0
+
+# Development tools
+tqdm>=4.64.0
+pyyaml>=6.0
