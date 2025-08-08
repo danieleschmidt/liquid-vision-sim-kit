@@ -633,13 +633,6 @@ int main(void) {{
         memory_usage["total_kb"] = sum(memory_usage[k] for k in ["weights_kb", "states_kb", "stack_kb"])
         
         return memory_usage
-            size_str = f"[{len(flat_data)}]"
-        else:
-            size_str = f"[{data.shape[0]}][{data.shape[1]}]"
-            
-        values = ", ".join(f"{x}" for x in flat_data)
-        
-        return f"static const {c_type} {name}{size_str} = {{{values}}};\n\n"
         
     def _generate_forward_function(self, model_info: Dict, quantized_weights: Dict) -> str:
         """Generate forward pass implementation."""
