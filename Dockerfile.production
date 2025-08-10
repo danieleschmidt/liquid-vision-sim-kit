@@ -1,0 +1,56 @@
+# Production Dockerfile for Liquid Vision Autonomous SDLC v4.0
+FROM python:3.9-slim
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+ENV LIQUID_VISION_ENV=production
+ENV AUTONOMOUS_MODE=true
+
+# Create non-root user for security
+RUN groupadd -r liquidvision && useradd -r -g liquidvision liquidvision
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements first for better Docker layer caching
+COPY requirements*.txt ./
+COPY pyproject.toml ./
+
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+# Copy application code
+COPY liquid_vision/ ./liquid_vision/
+COPY setup.py ./
+COPY README.md ./
+COPY LICENSE ./
+
+# Install application in editable mode
+RUN pip install -e .
+
+# Create required directories
+RUN mkdir -p /app/research_outputs /app/logs /app/datasets && \
+    chown -R liquidvision:liquidvision /app
+
+# Switch to non-root user
+USER liquidvision
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD python3 -c "import liquid_vision; assert liquid_vision.get_system_status()['autonomous_mode']" || exit 1
+
+# Production startup command
+CMD ["python3", "-m", "liquid_vision.cli", "serve", "--host", "0.0.0.0", "--port", "8080", "--autonomous"]
