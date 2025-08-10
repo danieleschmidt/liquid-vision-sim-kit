@@ -1,0 +1,81 @@
+version: '3.8'
+
+services:
+  liquid-vision-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.production
+    ports:
+      - "8080:8080"
+    environment:
+      - PYTHONPATH=/app
+      - LIQUID_VISION_ENV=production
+      - AUTONOMOUS_MODE=true
+      - MONITORING_ENABLED=true
+      - HEALTH_CHECKS_ENABLED=true
+      - AUTO_SCALING_ENABLED=true
+      - RESEARCH_MODE_ENABLED=true
+    volumes:
+      - ./research_outputs:/app/research_outputs
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import liquid_vision; assert liquid_vision.get_system_status()['autonomous_mode']"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+    networks:
+      - liquid-vision-network
+
+  liquid-vision-monitoring:
+    build:
+      context: .
+      dockerfile: Dockerfile.monitoring
+    ports:
+      - "9090:9090"
+    environment:
+      - MONITORING_TARGET=liquid-vision-api:8080
+    volumes:
+      - monitoring-data:/monitoring
+    depends_on:
+      - liquid-vision-api
+    networks:
+      - liquid-vision-network
+
+  liquid-vision-research:
+    build:
+      context: .
+      dockerfile: Dockerfile.research
+    environment:
+      - RESEARCH_MODE=true
+      - PYTHONPATH=/app
+    volumes:
+      - ./research_outputs:/app/research_outputs
+      - ./datasets:/app/datasets
+    depends_on:
+      - liquid-vision-api
+    networks:
+      - liquid-vision-network
+
+volumes:
+  monitoring-data:
+    driver: local
+
+networks:
+  liquid-vision-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
