@@ -348,6 +348,11 @@ class ErrorTracker:
         self.error_history.clear()
 
 
+# Convenient logger getter
+def get_logger(name: str = "liquid_vision") -> logging.Logger:
+    """Get a logger instance with the specified name."""
+    return logging.getLogger(name)
+
 # Global instances
 performance_logger = PerformanceLogger()
 security_logger = SecurityLogger()
