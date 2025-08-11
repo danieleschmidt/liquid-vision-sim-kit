@@ -16,6 +16,26 @@ from .defaults import DEFAULT_CONFIGS
 
 logger = logging.getLogger(__name__)
 
+# Global-first configuration extensions
+SUPPORTED_REGIONS = {
+    'us-east-1': {'name': 'US East (N. Virginia)', 'compliance': ['CCPA', 'COPPA']},
+    'us-west-2': {'name': 'US West (Oregon)', 'compliance': ['CCPA', 'COPPA']},
+    'eu-west-1': {'name': 'Europe (Ireland)', 'compliance': ['GDPR', 'DSGVO']},
+    'ap-northeast-1': {'name': 'Asia Pacific (Tokyo)', 'compliance': ['PDPA']},
+    'ap-southeast-1': {'name': 'Asia Pacific (Singapore)', 'compliance': ['PDPA']},
+}
+
+SUPPORTED_LANGUAGES = {
+    'en': 'English',
+    'es': 'Español',
+    'fr': 'Français', 
+    'de': 'Deutsch',
+    'ja': '日本語',
+    'zh': '中文',
+    'pt': 'Português',
+    'ru': 'Русский',
+}
+
 
 @dataclass
 class Config:
@@ -198,7 +218,7 @@ class SimulationConfig(Config):
 class ConfigManager:
     """
     Advanced configuration manager with hierarchical configs,
-    environment variable support, and validation.
+    environment variable support, validation, and global-first capabilities.
     """
     
     def __init__(self, config_dir: Optional[Union[str, Path]] = None):
@@ -216,6 +236,17 @@ class ConfigManager:
             Path("/etc/liquid_vision"),
             Path(__file__).parent / "defaults"
         ]
+        
+        # Global-first configuration
+        self.current_region = os.getenv('LIQUID_VISION_REGION', 'us-east-1')
+        self.current_language = os.getenv('LIQUID_VISION_LANG', 'en')
+        self.enabled_compliance = set()
+        self.global_settings = {
+            'multi_region': True,
+            'i18n_enabled': True,
+            'compliance_mode': True,
+            'edge_cdn': True,
+        }
         
     def load_config(
         self, 
@@ -423,3 +454,108 @@ class ConfigManager:
         
         # Return as string
         return value
+    
+    # Global-First Implementation Methods
+    def set_region(self, region: str) -> None:
+        """Set the current deployment region."""
+        if region not in SUPPORTED_REGIONS:
+            raise ValueError(f"Unsupported region: {region}. Supported regions: {list(SUPPORTED_REGIONS.keys())}")
+        
+        self.current_region = region
+        # Automatically enable compliance for the region
+        region_compliance = SUPPORTED_REGIONS[region]['compliance']
+        for compliance in region_compliance:
+            self.enabled_compliance.add(compliance)
+        
+        logger.info(f"Region set to {region} ({SUPPORTED_REGIONS[region]['name']})")
+        logger.info(f"Enabled compliance: {list(self.enabled_compliance)}")
+    
+    def set_language(self, language: str) -> None:
+        """Set the current language/locale."""
+        if language not in SUPPORTED_LANGUAGES:
+            raise ValueError(f"Unsupported language: {language}. Supported languages: {list(SUPPORTED_LANGUAGES.keys())}")
+        
+        self.current_language = language
+        logger.info(f"Language set to {language} ({SUPPORTED_LANGUAGES[language]})")
+    
+    def enable_compliance(self, compliance_standard: str) -> None:
+        """Enable a specific compliance standard."""
+        valid_standards = set()
+        for region_data in SUPPORTED_REGIONS.values():
+            valid_standards.update(region_data['compliance'])
+        
+        if compliance_standard not in valid_standards:
+            raise ValueError(f"Unsupported compliance: {compliance_standard}. Valid standards: {list(valid_standards)}")
+        
+        self.enabled_compliance.add(compliance_standard)
+        logger.info(f"Enabled compliance standard: {compliance_standard}")
+    
+    def get_global_status(self) -> Dict[str, Any]:
+        """Get current global configuration status."""
+        return {
+            'region': {
+                'current': self.current_region,
+                'name': SUPPORTED_REGIONS[self.current_region]['name'],
+                'supported': list(SUPPORTED_REGIONS.keys())
+            },
+            'language': {
+                'current': self.current_language,
+                'name': SUPPORTED_LANGUAGES[self.current_language],
+                'supported': list(SUPPORTED_LANGUAGES.keys())
+            },
+            'compliance': {
+                'enabled': list(self.enabled_compliance),
+                'available': list(set().union(*[r['compliance'] for r in SUPPORTED_REGIONS.values()]))
+            },
+            'global_settings': self.global_settings.copy()
+        }
+    
+    def is_gdpr_compliant(self) -> bool:
+        """Check if GDPR compliance is enabled."""
+        return 'GDPR' in self.enabled_compliance
+    
+    def is_ccpa_compliant(self) -> bool:
+        """Check if CCPA compliance is enabled."""
+        return 'CCPA' in self.enabled_compliance
+    
+    def get_region_optimized_config(self, config_type: str) -> Dict[str, Any]:
+        """Get region-optimized configuration settings."""
+        base_config = DEFAULT_CONFIGS.get(config_type, {}).copy()
+        
+        # Apply region-specific optimizations
+        if self.current_region.startswith('eu-'):
+            # EU region optimizations
+            base_config.update({
+                'privacy_enhanced': True,
+                'data_retention_days': 30 if 'GDPR' in self.enabled_compliance else 90,
+                'encryption_required': True,
+                'user_consent_required': True
+            })
+        elif self.current_region.startswith('ap-'):
+            # Asia-Pacific optimizations
+            base_config.update({
+                'latency_optimized': True,
+                'edge_processing_preferred': True,
+                'bandwidth_conscious': True
+            })
+        else:
+            # Default optimizations
+            base_config.update({
+                'performance_optimized': True,
+                'cost_optimized': True
+            })
+        
+        # Apply compliance requirements
+        if self.enabled_compliance:
+            base_config.update({
+                'audit_logging': True,
+                'secure_transport': True,
+                'data_minimization': True,
+                'user_rights_enabled': True
+            })
+        
+        return base_config
+
+
+# Global Configuration Manager Instance
+GlobalConfigManager = ConfigManager
