@@ -3,9 +3,59 @@ Liquid Neural Network implementations optimized for event-based processing.
 Based on Liquid AI architectures with temporal dynamics for neuromorphic computing.
 """
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+try:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    TORCH_AVAILABLE = True
+except ImportError:
+    # Lightweight numpy-based alternatives
+    import numpy as np
+    TORCH_AVAILABLE = False
+    
+    class nn:
+        class Module:
+            def __init__(self):
+                self.parameters_dict = {}
+            
+            def parameters(self):
+                return list(self.parameters_dict.values())
+            
+            def forward(self, x):
+                raise NotImplementedError
+            
+            def __call__(self, x):
+                return self.forward(x)
+        
+        class Linear:
+            def __init__(self, in_features, out_features):
+                self.weight = np.random.randn(out_features, in_features) * 0.01
+                self.bias = np.zeros(out_features)
+            
+            def forward(self, x):
+                return np.dot(x, self.weight.T) + self.bias
+    
+    class torch:
+        @staticmethod
+        def randn(*shape):
+            return np.random.randn(*shape)
+        
+        @staticmethod
+        def tanh(x):
+            return np.tanh(x)
+        
+        @staticmethod
+        def sigmoid(x):
+            return 1 / (1 + np.exp(-x))
+    
+    class F:
+        @staticmethod
+        def tanh(x):
+            return np.tanh(x)
+        
+        @staticmethod
+        def sigmoid(x):
+            return 1 / (1 + np.exp(-x))
 from typing import Dict, List, Optional, Tuple, Callable, Any
 import math
 import logging

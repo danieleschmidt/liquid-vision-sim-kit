@@ -237,7 +237,7 @@ class ConfigManager:
             Path(__file__).parent / "defaults"
         ]
         
-        # Global-first configuration
+        # Enhanced global configuration for worldwide deployment
         self.current_region = os.getenv('LIQUID_VISION_REGION', 'us-east-1')
         self.current_language = os.getenv('LIQUID_VISION_LANG', 'en')
         self.enabled_compliance = set()
@@ -246,6 +246,138 @@ class ConfigManager:
             'i18n_enabled': True,
             'compliance_mode': True,
             'edge_cdn': True,
+        }
+        
+        # Enhanced global configuration for worldwide deployment  
+        self.global_config = {
+            "regions": [
+                # Americas
+                "us-east-1", "us-west-2", "us-gov-west-1",
+                "ca-central-1", "sa-east-1",
+                # Europe  
+                "eu-west-1", "eu-west-2", "eu-central-1", "eu-north-1",
+                "eu-south-1", "eu-west-3",
+                # Asia Pacific
+                "ap-southeast-1", "ap-southeast-2", "ap-northeast-1",
+                "ap-northeast-2", "ap-south-1", "ap-east-1",
+                # Middle East & Africa
+                "me-south-1", "af-south-1",
+                # China (special regions)
+                "cn-north-1", "cn-northwest-1"
+            ],
+            "languages": [
+                # Major languages with ISO 639-1 codes
+                "en", "es", "fr", "de", "ja", "zh-cn", "zh-tw",
+                "ko", "pt", "ru", "ar", "hi", "it", "nl", "sv",
+                "no", "da", "fi", "pl", "tr", "th", "vi", "id"
+            ],
+            "compliance": {
+                "gdpr": {
+                    "enabled": True,
+                    "data_retention_days": 1095,
+                    "pseudonymization": True,
+                    "right_to_be_forgotten": True,
+                    "privacy_by_design": True
+                },
+                "ccpa": {
+                    "enabled": True,
+                    "opt_out_enabled": True,
+                    "do_not_sell": True,
+                    "privacy_rights_disclosure": True
+                },
+                "pdpa": {
+                    "enabled": True,
+                    "consent_required": True,
+                    "data_breach_notification": True,
+                    "singapore_compliance": True
+                },
+                "lgpd": {  # Brazil's General Data Protection Law
+                    "enabled": True,
+                    "lawful_basis_required": True,
+                    "data_protection_officer": True
+                },
+                "pipeda": {  # Canada's Personal Information Protection
+                    "enabled": True,
+                    "purpose_limitation": True,
+                    "consent_requirements": True
+                },
+                "privacy_act": {  # Australia Privacy Act
+                    "enabled": True,
+                    "notifiable_data_breaches": True,
+                    "privacy_policy_required": True
+                },
+                "kvkk": {  # Turkey's Data Protection Law
+                    "enabled": True,
+                    "explicit_consent": True,
+                    "data_controller_registration": True
+                },
+                "lei_geral": {  # Mexico's data protection
+                    "enabled": True,
+                    "privacy_notice_required": True
+                },
+                "popi": {  # South Africa Protection of Personal Information
+                    "enabled": True,
+                    "information_officer_required": True
+                }
+            },
+            "localization": {
+                "timezone_aware": True,
+                "currency_support": [
+                    "USD", "EUR", "JPY", "GBP", "CAD", "AUD", "CHF",
+                    "CNY", "KRW", "SGD", "HKD", "INR", "BRL", "MXN",
+                    "SEK", "NOK", "DKK", "PLN", "CZK", "HUF", "TRY"
+                ],
+                "date_formats": {
+                    "us": "MM/DD/YYYY",
+                    "eu": "DD/MM/YYYY",
+                    "iso": "YYYY-MM-DD",
+                    "japan": "YYYY年MM月DD日",
+                    "china": "YYYY-MM-DD",
+                    "korea": "YYYY.MM.DD"
+                },
+                "number_formats": {
+                    "decimal_separator": {"us": ".", "eu": ","},
+                    "thousands_separator": {"us": ",", "eu": "."},
+                    "currency_position": {"us": "before", "eu": "after"}
+                },
+                "rtl_languages": ["ar", "he", "fa", "ur"],
+                "accessibility": {
+                    "wcag_compliance": "2.1_AA",
+                    "screen_reader_support": True,
+                    "high_contrast_mode": True,
+                    "keyboard_navigation": True
+                }
+            },
+            "edge_deployment": {
+                "supported_architectures": [
+                    "arm64", "armv7", "x86_64", "aarch64",
+                    "riscv64", "mips", "esp32", "cortex-m"
+                ],
+                "optimization_levels": ["O0", "O1", "O2", "O3", "Os"],
+                "memory_constraints": {
+                    "tiny": "32KB",
+                    "small": "128KB", 
+                    "medium": "512KB",
+                    "large": "2MB"
+                }
+            },
+            "security": {
+                "encryption": {
+                    "at_rest": "AES-256-GCM",
+                    "in_transit": "TLS-1.3",
+                    "keys": "RSA-4096"
+                },
+                "authentication": {
+                    "multi_factor": True,
+                    "biometric_support": True,
+                    "oauth2_providers": ["google", "microsoft", "apple", "github"]
+                },
+                "audit_logging": {
+                    "enabled": True,
+                    "retention_days": 2555,  # 7 years
+                    "real_time_monitoring": True
+                }
+            }
         }
         
     def load_config(
