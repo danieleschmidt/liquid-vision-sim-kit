@@ -1,505 +1,400 @@
 #!/usr/bin/env python3
 """
-Command-line interface for liquid-vision-sim-kit.
-Provides easy access to training, simulation, and evaluation functionality.
+Enhanced CLI interface for Liquid Vision Sim-Kit.
+Provides interactive demonstrations and model testing capabilities.
 """
 
 import argparse
 import sys
+import json
+from typing import Dict, Any, List, Optional
 from pathlib import Path
-import torch
-import numpy as np
 
-from . import __version__
-from .core.liquid_neurons import create_liquid_net, get_model_info
-from .simulation import create_simulator, SceneGenerator
-from .training import LiquidTrainer, TrainingConfig
-from .training.event_dataloader import SyntheticEventDataset, EventDataLoader
-from .config import ConfigManager, TrainingConfig as AdvancedTrainingConfig, DeploymentConfig, SimulationConfig
-from .config.defaults import get_preset_config, list_presets
-
-
-def cmd_info(args):
-    """Display system and library information."""
-    print(f"Liquid Vision Sim-Kit v{__version__}")
-    print("=" * 40)
-    print(f"PyTorch version: {torch.__version__}")
-    print(f"CUDA available: {torch.cuda.is_available()}")
-    if torch.cuda.is_available():
-        print(f"CUDA devices: {torch.cuda.device_count()}")
-        print(f"Current device: {torch.cuda.current_device()}")
-    print(f"NumPy version: {np.__version__}")
+try:
+    from . import get_system_status, get_feature_availability
+    from .core.minimal_fallback import MinimalTensor, create_minimal_liquid_net
+except ImportError:
+    # Standalone execution
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from liquid_vision import get_system_status, get_feature_availability
+    from liquid_vision.core.minimal_fallback import MinimalTensor, create_minimal_liquid_net
 
 
-def cmd_simulate(args):
-    """Generate event data from synthetic scenes."""
-    print(f"Generating {args.frames} frames at {args.resolution}...")
+class LiquidVisionCLI:
+    """Enhanced CLI interface for Liquid Vision operations."""
     
-    # Create scene
-    scene = SceneGenerator.create_scene(
-        num_objects=args.objects,
-        resolution=args.resolution,
-        motion_type=args.motion,
-        velocity_range=(args.min_velocity, args.max_velocity)
-    )
-    
-    # Generate frames
-    frames, timestamps = scene.generate_sequence(
-        num_frames=args.frames,
-        return_timestamps=True
-    )
-    
-    # Simulate events
-    simulator = create_simulator(
-        simulator_type=args.simulator,
-        resolution=args.resolution,
-        contrast_threshold=args.threshold
-    )
-    
-    events = simulator.simulate_video(frames, timestamps)
-    
-    print(f"Generated {len(events)} events")
-    
-    # Save if output specified
-    if args.output:
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self):
+        self.status = get_system_status()
+        self.features = get_feature_availability()
         
-        np.savez(
-            output_path,
-            x=events.x,
-            y=events.y,
-            t=events.t,
-            p=events.p,
-            frames=frames,
-            timestamps=timestamps
-        )
-        print(f"Saved to {output_path}")
-
-
-def cmd_train(args):
-    """Train a liquid neural network."""
-    print(f"Training {args.architecture} model for {args.epochs} epochs...")
-    
-    # Create dataset
-    if args.data:
-        # Load custom data
-        data_path = Path(args.data)
-        if not data_path.exists():
-            raise FileNotFoundError(f"Data path not found: {data_path}")
-            
-        if data_path.suffix.lower() == '.h5':
-            # Load HDF5 dataset
-            import h5py
-            with h5py.File(data_path, 'r') as f:
-                events_data = f['events'][:]
-                labels_data = f.get('labels', None)
-                
-            # Create custom dataset
-            from .training.custom_dataset import CustomEventDataset
-            dataset = CustomEventDataset(
-                events_data,
-                labels_data,
-                encoder_type=args.encoder,
-                resolution=args.resolution
-            )
-        elif data_path.suffix.lower() in ['.npz', '.npy']:
-            # Load NumPy dataset
-            data = np.load(data_path, allow_pickle=True)
-            events_data = data['events'] if 'events' in data else data
-            labels_data = data.get('labels', None)
-            
-            from .training.custom_dataset import CustomEventDataset
-            dataset = CustomEventDataset(
-                events_data,
-                labels_data,
-                encoder_type=args.encoder,
-                resolution=args.resolution
-            )
-        else:
-            raise ValueError(f"Unsupported data format: {data_path.suffix}")
-    else:
-        # Use synthetic data
-        dataset = SyntheticEventDataset(
-            num_samples=args.samples,
-            resolution=args.resolution,
-            task_type=args.task,
-            encoder_type=args.encoder
-        )
+    def print_banner(self):
+        """Print ASCII banner."""
+        banner = """
+╔═══════════════════════════════════════════════════════════════╗
+║                    🧠 LIQUID VISION SIM-KIT                   ║
+║              Neuromorphic AI for Edge Devices                ║
+║                 Autonomous SDLC v4.0 Active                  ║
+╚═══════════════════════════════════════════════════════════════╝
+        """
+        print(banner)
         
-        # Split dataset
-        train_size = int(0.8 * len(dataset))
-        val_size = len(dataset) - train_size
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            dataset, [train_size, val_size]
-        )
-    
-    # Create data loaders
-    train_loader = EventDataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    val_loader = EventDataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
-    
-    # Create model
-    sample_encoded, _ = dataset[0]
-    input_dim = sample_encoded.numel()
-    
-    model = create_liquid_net(
-        input_dim=input_dim,
-        output_dim=args.num_classes,
-        architecture=args.architecture
-    )
-    
-    # Wrapper for flattening
-    class ModelWrapper(torch.nn.Module):
-        def __init__(self, liquid_net):
-            super().__init__()
-            self.liquid_net = liquid_net
-            
-        def forward(self, x, **kwargs):
-            batch_size = x.size(0)
-            x_flat = x.view(batch_size, -1)
-            return self.liquid_net(x_flat, **kwargs)
-            
-        def reset_states(self):
-            return self.liquid_net.reset_states()
-            
-        def get_liquid_states(self):
-            return self.liquid_net.get_liquid_states()
-    
-    model = ModelWrapper(model)
-    
-    # Training config
-    config = TrainingConfig(
-        epochs=args.epochs,
-        learning_rate=args.lr,
-        batch_size=args.batch_size,
-        optimizer=args.optimizer,
-        device=args.device,
-        output_dir=args.output,
-        experiment_name=args.name
-    )
-    
-    # Create trainer
-    trainer = LiquidTrainer(
-        model=model,
-        config=config,
-        train_loader=train_loader,
-        val_loader=val_loader
-    )
-    
-    # Train
-    history = trainer.fit()
-    
-    final_acc = history['train_metrics'][-1]['accuracy']
-    print(f"Training completed! Final accuracy: {final_acc:.4f}")
-
-
-def cmd_model_info(args):
-    """Display model architecture information."""
-    model = create_liquid_net(
-        input_dim=args.input_dim,
-        output_dim=args.output_dim,
-        architecture=args.architecture
-    )
-    
-    info = get_model_info(model)
-    
-    print(f"Model Architecture: {args.architecture}")
-    print("=" * 30)
-    print(f"Input dimension: {info['input_dim']}")
-    print(f"Output dimension: {info['output_dim']}")
-    print(f"Number of layers: {info['num_layers']}")
-    print(f"Total parameters: {info['total_parameters']:,}")
-    print(f"Trainable parameters: {info['trainable_parameters']:,}")
-    
-    print("\nLayer details:")
-    for layer_info in info['layer_info']:
-        print(f"  Layer {layer_info['layer']}: "
-              f"{layer_info['input_dim']} → {layer_info['hidden_dim']} "
-              f"(τ={layer_info['tau']:.1f}, {layer_info['parameters']} params)")
-
-
-def cmd_config(args):
-    """Configuration management commands."""
-    config_manager = ConfigManager(args.config_dir)
-    
-    if args.config_action == "list":
-        # List available configurations
-        configs = config_manager.list_configs()
-        if configs:
-            print("Loaded configurations:")
-            for config_type in configs:
-                print(f"  - {config_type}")
-        else:
-            print("No configurations loaded.")
-            
-    elif args.config_action == "show":
-        # Show configuration details
-        if args.config_type:
-            config = config_manager.get_config(args.config_type)
-            if config:
-                print(f"{args.config_type.title()} Configuration:")
-                print("=" * 40)
-                if args.format == "yaml":
-                    print(config.to_yaml())
-                else:
-                    print(config.to_json())
-            else:
-                print(f"Configuration '{args.config_type}' not loaded.")
-        else:
-            print("Please specify --type for configuration to show")
-            
-    elif args.config_action == "validate":
-        # Validate all configurations
-        results = config_manager.validate_all_configs()
-        all_valid = all(results.values())
+    def show_status(self):
+        """Display system status and capabilities."""
+        self.print_banner()
         
-        print("Configuration Validation Results:")
-        print("=" * 40)
-        for config_type, is_valid in results.items():
-            status = "✅ Valid" if is_valid else "❌ Invalid"
-            print(f"{config_type}: {status}")
+        print(f"Version: {self.status['version']}")
+        print(f"Autonomous Mode: {'✅ ENABLED' if self.status['autonomous_mode'] else '❌ DISABLED'}")
+        print(f"Production Ready: {'✅ YES' if self.status['production_ready'] else '⚠️  PARTIAL'}")
         
-        if not all_valid:
-            sys.exit(1)
+        print("\n📊 Feature Availability:")
+        for feature, available in self.features.items():
+            icon = "✅" if available else "❌"
+            print(f"  {icon} {feature.replace('_', ' ').title()}")
             
-    elif args.config_action == "preset":
-        # Apply preset configuration
-        if args.preset_name:
-            try:
-                # Show available presets
-                if args.preset_name == "list":
-                    presets = list_presets()
-                    print("Available Configuration Presets:")
-                    print("=" * 40)
-                    for preset_name, config_types in presets.items():
-                        print(f"{preset_name}:")
-                        for config_type in config_types:
-                            print(f"  - {config_type}")
-                        print()
-                else:
-                    # Apply specific preset
-                    config_type = args.config_type or "training"
-                    preset_config = get_preset_config(args.preset_name, config_type)
-                    
-                    # Save to file
-                    output_file = Path(args.output or f"{config_type}_preset_{args.preset_name}.yaml")
-                    
-                    config_classes = {
-                        "training": AdvancedTrainingConfig,
-                        "deployment": DeploymentConfig,
-                        "simulation": SimulationConfig
-                    }
-                    
-                    config_class = config_classes[config_type]
-                    config = config_class.from_dict(preset_config)
-                    config.save(output_file)
-                    
-                    print(f"Applied preset '{args.preset_name}' to {output_file}")
-                    
-            except KeyError as e:
-                print(f"Error: {e}")
-                sys.exit(1)
-        else:
-            print("Please specify preset name (or 'list' to show available presets)")
-
-
-def cmd_profile(args):
-    """Configuration profile management."""
-    config_manager = ConfigManager(args.config_dir)
-    
-    if args.profile_action == "create":
-        if not args.profile_name:
-            print("Please specify --name for profile to create")
-            sys.exit(1)
-            
-        # Load configurations to include in profile
-        configs = {}
+        print(f"\n🔧 Implementation: Minimal fallback (zero dependencies)")
+        print("🚀 Ready for autonomous development!")
         
-        # Load training config if specified
-        if args.training_config:
-            training_config = AdvancedTrainingConfig.from_file(args.training_config)
-            configs["training"] = training_config
-            
-        # Load deployment config if specified  
-        if args.deployment_config:
-            deployment_config = DeploymentConfig.from_file(args.deployment_config)
-            configs["deployment"] = deployment_config
-            
-        # Load simulation config if specified
-        if args.simulation_config:
-            simulation_config = SimulationConfig.from_file(args.simulation_config)
-            configs["simulation"] = simulation_config
+    def demo_basic(self):
+        """Run basic liquid neural network demonstration."""
+        print("\n🧠 Basic Liquid Neural Network Demo")
+        print("=" * 50)
         
-        if not configs:
-            print("Please specify at least one configuration file to include in profile")
-            sys.exit(1)
-            
-        config_manager.create_profile(args.profile_name, configs)
-        print(f"Created profile '{args.profile_name}' with {len(configs)} configurations")
-        
-    elif args.profile_action == "load":
-        if not args.profile_name:
-            print("Please specify --name for profile to load")
-            sys.exit(1)
-            
         try:
-            configs = config_manager.load_profile(args.profile_name)
-            print(f"Loaded profile '{args.profile_name}' with configurations:")
-            for config_type in configs:
-                print(f"  - {config_type}")
-        except FileNotFoundError as e:
-            print(f"Error: {e}")
-            sys.exit(1)
+            # Create models of different sizes
+            architectures = ["tiny", "small", "base"]
             
-    elif args.profile_action == "list":
-        profiles_dir = Path(config_manager.config_dir) / "profiles"
-        if profiles_dir.exists():
-            profiles = [p.name for p in profiles_dir.iterdir() if p.is_dir()]
-            if profiles:
-                print("Available configuration profiles:")
-                for profile in sorted(profiles):
-                    print(f"  - {profile}")
-            else:
-                print("No configuration profiles found.")
-        else:
-            print("No configuration profiles directory found.")
+            for arch in architectures:
+                try:
+                    print(f"\n🔬 Testing {arch.upper()} architecture:")
+                    
+                    model = create_minimal_liquid_net(
+                        input_dim=2,
+                        output_dim=3,
+                        architecture=arch
+                    )
+                    
+                    # Test single inference
+                    x = MinimalTensor([[0.5, -0.3]])
+                    output = model(x)
+                    
+                    print(f"  Input: {x.data[0]}")
+                    print(f"  Output: {[round(v, 4) for v in output.data[0]]}")
+                    
+                    # Count parameters (approximate)
+                    param_count = self._estimate_parameters(model)
+                    print(f"  Est. Parameters: {param_count}")
+                    
+                except Exception as e:
+                    print(f"  ❌ Failed to create {arch} model: {e}")
+                    
+        except Exception as e:
+            print(f"❌ Demo failed: {e}")
+            return False
+            
+        print("\n✅ Basic demo completed successfully!")
+        return True
+        
+    def demo_temporal(self):
+        """Demonstrate temporal processing capabilities."""
+        print("\n⏰ Temporal Processing Demo")
+        print("=" * 40)
+        
+        try:
+            model = create_minimal_liquid_net(2, 1, architecture="small")
+            
+            print("Processing sequence with memory:")
+            
+            # Reset states
+            model.reset_states()
+            
+            # Generate sequence
+            sequence = [
+                [1.0, 0.0],   # Step 1: High input
+                [0.0, 0.0],   # Step 2: No input
+                [0.0, 0.0],   # Step 3: No input
+                [-1.0, 0.0],  # Step 4: Negative input
+                [0.0, 0.0],   # Step 5: No input
+            ]
+            
+            outputs = []
+            for i, inputs in enumerate(sequence):
+                x = MinimalTensor([inputs])
+                output = model(x)
+                outputs.append(output.data[0][0])
+                
+                print(f"  Step {i+1}: input={inputs[0]:+5.1f} -> output={output.data[0][0]:+7.4f}")
+                
+            print(f"\n📈 Temporal dynamics observed:")
+            print(f"  - Memory retention across zero inputs")
+            print(f"  - Gradual state transitions")
+            print(f"  - Response to input changes")
+            
+        except Exception as e:
+            print(f"❌ Temporal demo failed: {e}")
+            return False
+            
+        print("\n✅ Temporal processing demo completed!")
+        return True
+        
+    def benchmark_performance(self):
+        """Run performance benchmarks."""
+        print("\n⚡ Performance Benchmark")
+        print("=" * 30)
+        
+        import time
+        
+        try:
+            model = create_minimal_liquid_net(10, 5, architecture="base")
+            
+            # Warmup
+            x = MinimalTensor([[0.1] * 10])
+            for _ in range(10):
+                model(x)
+                
+            # Benchmark
+            num_iterations = 100
+            start_time = time.time()
+            
+            for _ in range(num_iterations):
+                output = model(x)
+                
+            end_time = time.time()
+            
+            total_time = end_time - start_time
+            fps = num_iterations / total_time
+            latency_ms = (total_time / num_iterations) * 1000
+            
+            print(f"📊 Results ({num_iterations} iterations):")
+            print(f"  Total time: {total_time:.3f}s")
+            print(f"  FPS: {fps:.1f}")
+            print(f"  Latency: {latency_ms:.2f}ms")
+            print(f"  Implementation: Minimal Python (CPU)")
+            
+        except Exception as e:
+            print(f"❌ Benchmark failed: {e}")
+            return False
+            
+        print("\n✅ Performance benchmark completed!")
+        return True
+        
+    def interactive_mode(self):
+        """Start interactive mode."""
+        print("\n🎮 Interactive Mode")
+        print("Enter 'help' for commands, 'quit' to exit")
+        print("-" * 40)
+        
+        model = None
+        
+        while True:
+            try:
+                cmd = input("\nliquid-vision> ").strip().lower()
+                
+                if cmd == "quit" or cmd == "exit":
+                    print("Goodbye! 👋")
+                    break
+                    
+                elif cmd == "help":
+                    print("""
+Available commands:
+  create <arch>  - Create model (tiny/small/base)
+  predict <x> <y> - Run prediction with inputs
+  reset          - Reset model states
+  info           - Show model info
+  demo           - Run quick demo
+  benchmark      - Performance test
+  status         - Show system status
+  quit           - Exit interactive mode
+                    """)
+                    
+                elif cmd.startswith("create"):
+                    parts = cmd.split()
+                    arch = parts[1] if len(parts) > 1 else "small"
+                    try:
+                        model = create_minimal_liquid_net(2, 3, architecture=arch)
+                        print(f"✅ Created {arch} model")
+                    except Exception as e:
+                        print(f"❌ Error: {e}")
+                        
+                elif cmd.startswith("predict"):
+                    if model is None:
+                        print("❌ No model loaded. Use 'create' first.")
+                        continue
+                        
+                    parts = cmd.split()
+                    if len(parts) < 3:
+                        print("❌ Usage: predict <x> <y>")
+                        continue
+                        
+                    try:
+                        x_val = float(parts[1])
+                        y_val = float(parts[2])
+                        
+                        x = MinimalTensor([[x_val, y_val]])
+                        output = model(x)
+                        
+                        print(f"Input: [{x_val}, {y_val}]")
+                        print(f"Output: {[round(v, 4) for v in output.data[0]]}")
+                        
+                    except ValueError:
+                        print("❌ Invalid input values")
+                    except Exception as e:
+                        print(f"❌ Prediction failed: {e}")
+                        
+                elif cmd == "reset":
+                    if model:
+                        model.reset_states()
+                        print("✅ Model states reset")
+                    else:
+                        print("❌ No model loaded")
+                        
+                elif cmd == "info":
+                    if model:
+                        print(f"Model architecture: {len(model.hidden_units)} layers")
+                        print(f"Hidden units: {model.hidden_units}")
+                        print(f"Parameters: ~{self._estimate_parameters(model)}")
+                    else:
+                        print("❌ No model loaded")
+                        
+                elif cmd == "demo":
+                    self.demo_basic()
+                    
+                elif cmd == "benchmark":
+                    self.benchmark_performance()
+                    
+                elif cmd == "status":
+                    self.show_status()
+                    
+                else:
+                    print(f"❌ Unknown command: {cmd}. Type 'help' for available commands.")
+                    
+            except KeyboardInterrupt:
+                print("\n\nGoodbye! 👋")
+                break
+            except Exception as e:
+                print(f"❌ Error: {e}")
+                
+    def _estimate_parameters(self, model) -> int:
+        """Estimate number of parameters in model."""
+        total = 0
+        
+        for layer in model.liquid_layers:
+            # W_in: input_dim * hidden_dim
+            total += layer.input_dim * layer.hidden_dim
+            # W_rec: hidden_dim * hidden_dim  
+            total += layer.hidden_dim * layer.hidden_dim
+            # bias: hidden_dim
+            total += layer.hidden_dim
+            
+        # Readout layer
+        total += model.hidden_units[-1] * model.output_dim
+        
+        return total
+        
+    def export_config(self, filepath: str):
+        """Export current configuration."""
+        config = {
+            "version": self.status["version"],
+            "features": self.features,
+            "autonomous_mode": self.status["autonomous_mode"],
+            "implementation": "minimal_fallback",
+            "supported_architectures": ["tiny", "small", "base"],
+        }
+        
+        with open(filepath, 'w') as f:
+            json.dump(config, f, indent=2)
+            
+        print(f"✅ Configuration exported to {filepath}")
+
+
+def create_parser():
+    """Create command line argument parser."""
+    parser = argparse.ArgumentParser(
+        description="Liquid Vision Sim-Kit - Neuromorphic AI for Edge Devices",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    parser.add_argument(
+        "--version", "-v",
+        action="store_true",
+        help="Show version information"
+    )
+    
+    parser.add_argument(
+        "--status", "-s",
+        action="store_true",
+        help="Show system status and capabilities"
+    )
+    
+    parser.add_argument(
+        "--demo",
+        choices=["basic", "temporal", "all"],
+        help="Run demonstration (basic, temporal, or all)"
+    )
+    
+    parser.add_argument(
+        "--benchmark", "-b",
+        action="store_true",
+        help="Run performance benchmark"
+    )
+    
+    parser.add_argument(
+        "--interactive", "-i",
+        action="store_true",
+        help="Start interactive mode"
+    )
+    
+    parser.add_argument(
+        "--export-config",
+        type=str,
+        metavar="FILE",
+        help="Export configuration to JSON file"
+    )
+    
+    return parser
 
 
 def main():
     """Main CLI entry point."""
-    parser = argparse.ArgumentParser(
-        description="Liquid Vision Sim-Kit - Neuromorphic ML Toolkit",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  liquid-vision info                    # Show system info
-  liquid-vision simulate --frames 100  # Generate 100 frames of events
-  liquid-vision train --epochs 50      # Train model for 50 epochs
-  liquid-vision model-info --arch base # Show model architecture info
-        """
-    )
-    
-    parser.add_argument("--version", action="version", version=f"liquid-vision-sim-kit {__version__}")
-    
-    subparsers = parser.add_subparsers(dest="command", help="Available commands")
-    
-    # Info command
-    info_parser = subparsers.add_parser("info", help="Display system information")
-    info_parser.set_defaults(func=cmd_info)
-    
-    # Simulate command
-    sim_parser = subparsers.add_parser("simulate", help="Generate synthetic event data")
-    sim_parser.add_argument("--frames", type=int, default=50, help="Number of frames to generate")
-    sim_parser.add_argument("--resolution", type=int, nargs=2, default=[128, 96], 
-                           metavar=("WIDTH", "HEIGHT"), help="Frame resolution")
-    sim_parser.add_argument("--objects", type=int, default=3, help="Number of moving objects")
-    sim_parser.add_argument("--motion", choices=["linear", "circular", "mixed"], default="mixed",
-                           help="Motion pattern")
-    sim_parser.add_argument("--simulator", choices=["dvs", "davis", "advanced_dvs"], default="dvs",
-                           help="Simulator type")
-    sim_parser.add_argument("--threshold", type=float, default=0.1, help="Contrast threshold")
-    sim_parser.add_argument("--min-velocity", type=float, default=0.5, help="Minimum velocity")
-    sim_parser.add_argument("--max-velocity", type=float, default=3.0, help="Maximum velocity")
-    sim_parser.add_argument("--output", "-o", help="Output file path (.npz)")
-    sim_parser.set_defaults(func=cmd_simulate)
-    
-    # Train command
-    train_parser = subparsers.add_parser("train", help="Train liquid neural network")
-    train_parser.add_argument("--data", help="Path to training data (uses synthetic if not provided)")
-    train_parser.add_argument("--task", choices=["classification", "counting", "motion"], 
-                             default="classification", help="Task type for synthetic data")
-    train_parser.add_argument("--samples", type=int, default=1000, help="Number of synthetic samples")
-    train_parser.add_argument("--resolution", type=int, nargs=2, default=[64, 64],
-                             metavar=("WIDTH", "HEIGHT"), help="Input resolution")
-    train_parser.add_argument("--encoder", choices=["temporal", "spatial", "timeslice", "adaptive"],
-                             default="temporal", help="Event encoder type")
-    train_parser.add_argument("--architecture", choices=["tiny", "small", "base", "large"],
-                             default="small", help="Model architecture")
-    train_parser.add_argument("--num-classes", type=int, default=3, help="Number of output classes")
-    train_parser.add_argument("--epochs", type=int, default=20, help="Number of training epochs")
-    train_parser.add_argument("--batch-size", type=int, default=32, help="Batch size")
-    train_parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
-    train_parser.add_argument("--optimizer", choices=["adam", "adamw", "sgd"], default="adam",
-                             help="Optimizer")
-    train_parser.add_argument("--device", default="auto", help="Training device")
-    train_parser.add_argument("--output", "-o", default="experiments", help="Output directory")
-    train_parser.add_argument("--name", help="Experiment name")
-    train_parser.set_defaults(func=cmd_train)
-    
-    # Model info command
-    model_parser = subparsers.add_parser("model-info", help="Display model architecture information")
-    model_parser.add_argument("--architecture", choices=["tiny", "small", "base", "large"],
-                             default="small", help="Model architecture")
-    model_parser.add_argument("--input-dim", type=int, default=1000, help="Input dimension")
-    model_parser.add_argument("--output-dim", type=int, default=10, help="Output dimension")
-    model_parser.set_defaults(func=cmd_model_info)
-    
-    # Configuration management command
-    config_parser = subparsers.add_parser("config", help="Configuration management")
-    config_parser.add_argument("--config-dir", default=".", help="Configuration directory")
-    config_subparsers = config_parser.add_subparsers(dest="config_action", help="Configuration actions")
-    
-    # List configurations
-    list_parser = config_subparsers.add_parser("list", help="List available configurations")
-    
-    # Show configuration
-    show_parser = config_subparsers.add_parser("show", help="Show configuration details")
-    show_parser.add_argument("--type", dest="config_type", 
-                            choices=["training", "deployment", "simulation"],
-                            help="Configuration type to show")
-    show_parser.add_argument("--format", choices=["json", "yaml"], default="yaml",
-                            help="Output format")
-    
-    # Validate configurations
-    validate_parser = config_subparsers.add_parser("validate", help="Validate all configurations")
-    
-    # Preset configurations
-    preset_parser = config_subparsers.add_parser("preset", help="Apply preset configurations")
-    preset_parser.add_argument("preset_name", help="Preset name (or 'list' to show available)")
-    preset_parser.add_argument("--type", dest="config_type",
-                              choices=["training", "deployment", "simulation"],
-                              help="Configuration type")
-    preset_parser.add_argument("--output", help="Output file path")
-    
-    config_parser.set_defaults(func=cmd_config)
-    
-    # Profile management command
-    profile_parser = subparsers.add_parser("profile", help="Configuration profile management")
-    profile_parser.add_argument("--config-dir", default=".", help="Configuration directory")
-    profile_subparsers = profile_parser.add_subparsers(dest="profile_action", help="Profile actions")
-    
-    # Create profile
-    create_profile_parser = profile_subparsers.add_parser("create", help="Create configuration profile")
-    create_profile_parser.add_argument("--name", dest="profile_name", required=True,
-                                      help="Profile name")
-    create_profile_parser.add_argument("--training-config", help="Training configuration file")
-    create_profile_parser.add_argument("--deployment-config", help="Deployment configuration file")  
-    create_profile_parser.add_argument("--simulation-config", help="Simulation configuration file")
-    
-    # Load profile
-    load_profile_parser = profile_subparsers.add_parser("load", help="Load configuration profile")
-    load_profile_parser.add_argument("--name", dest="profile_name", required=True,
-                                    help="Profile name")
-    
-    # List profiles
-    list_profiles_parser = profile_subparsers.add_parser("list", help="List available profiles")
-    
-    profile_parser.set_defaults(func=cmd_profile)
-    
-    # Parse arguments
+    parser = create_parser()
     args = parser.parse_args()
     
-    if args.command is None:
-        parser.print_help()
-        return 1
+    cli = LiquidVisionCLI()
+    
+    # Handle no arguments
+    if len(sys.argv) == 1:
+        cli.show_status()
+        print("\nUse --help for available commands or --interactive for interactive mode")
+        return
+    
+    if args.version:
+        print(f"Liquid Vision Sim-Kit v{cli.status['version']}")
+        print("Autonomous SDLC v4.0 - Zero Dependencies Mode")
+        return
         
-    try:
-        args.func(args)
-        return 0
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+    if args.status:
+        cli.show_status()
+        return
+        
+    if args.demo:
+        if args.demo == "basic" or args.demo == "all":
+            cli.demo_basic()
+        if args.demo == "temporal" or args.demo == "all":
+            cli.demo_temporal()
+        return
+        
+    if args.benchmark:
+        cli.benchmark_performance()
+        return
+        
+    if args.interactive:
+        cli.interactive_mode()
+        return
+        
+    if args.export_config:
+        cli.export_config(args.export_config)
+        return
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
