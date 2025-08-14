@@ -53,6 +53,20 @@ def _safe_import(module_name: str, feature_key: str) -> Optional[Any]:
             return {"EdgeDeployer": EdgeDeployer}
     except ImportError as e:
         logger.warning(f"Module {module_name} unavailable: {e}")
+        # Try fallback implementations
+        if module_name == "core.liquid_neurons":
+            try:
+                from .core import LiquidNeuron, LiquidNet, create_liquid_net, _IMPLEMENTATION
+                logger.info(f"🔄 Using {_IMPLEMENTATION} fallback implementations for core neurons")
+                _FEATURES_AVAILABLE[feature_key] = True
+                return {
+                    "LiquidNeuron": LiquidNeuron, 
+                    "LiquidNet": LiquidNet,
+                    "create_liquid_net": create_liquid_net
+                }
+            except Exception as fallback_error:
+                logger.error(f"Fallback also failed: {fallback_error}")
+        
         warnings.warn(f"Feature '{feature_key}' disabled due to missing dependencies")
         return None
     except Exception as e:
