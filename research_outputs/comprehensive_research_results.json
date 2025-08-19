@@ -1,10 +1,10 @@
 {
   "study_metadata": {
-    "total_time_seconds": 0.004070758819580078,
+    "total_time_seconds": 0.002880573272705078,
     "algorithms_tested": 6,
     "statistical_runs": 10,
     "significance_level": 0.001,
-    "timestamp": 1755284810.9149542
+    "timestamp": 1755627408.794775
   },
   "experimental_data": {
     "baseline_results": {
