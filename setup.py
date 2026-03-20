@@ -9,8 +9,8 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 setup(
     name="liquid-vision-sim-kit",
     version="0.1.0",
-    author="Terragon Labs",
-    author_email="contact@terragonlabs.com",
+    author="Daniel Schmidt",
+    author_email="",
     description="Neuromorphic Dataset Generator & Training Loop for Liquid Neural Networks on Edge Devices",
     long_description=long_description,
     long_description_content_type="text/markdown",

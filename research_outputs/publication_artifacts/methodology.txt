@@ -1,9 +1,0 @@
-RESEARCH METHODOLOGY
-===================
-
-Statistical tests performed: 15
-Significance threshold: p < 0.001
-Average effect size: 1.80
-Average statistical power: 0.920
-Independent validation runs: 3
-Reproducibility score: 0.97

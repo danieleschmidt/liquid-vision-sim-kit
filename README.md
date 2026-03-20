@@ -1,251 +1,119 @@
 # liquid-vision-sim-kit
 
-🧠 **Neuromorphic Dataset Generator & Training Loop for Liquid Neural Networks on Edge Devices**
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
-[![Documentation](https://img.shields.io/badge/docs-available-green.svg)](./docs)
+Neuromorphic event-camera simulation and liquid state network inference kit for embedded / edge deployment.
 
 ## Overview
 
-The liquid-vision-sim-kit provides a comprehensive framework for generating neuromorphic datasets and training Liquid Neural Networks (LNNs) specifically designed for event-based cameras on resource-constrained edge devices (Cortex-M, ESP32). This project addresses the critical gap in open-source simulators for Liquid AI models, which have demonstrated 10× energy savings compared to traditional approaches.
+`liquid-vision-sim-kit` provides a minimal, NumPy-only toolkit for experimenting with bio-inspired, event-driven vision and reservoir computing (echo-state networks) on resource-constrained devices (ARM Cortex-M, ESP32, etc.).
 
-## Key Features
+### Components
 
-- **Event Camera Simulation**: High-fidelity simulation of DVS/DAVIS cameras with configurable noise models
-- **Liquid Neural Network Implementation**: Efficient LNN architectures optimized for temporal processing
-- **Edge Device Optimization**: Quantization-aware training and model compression for MCU deployment
-- **Synthetic Dataset Generation**: Procedural generation of event streams for various vision tasks
-- **Hardware-in-the-Loop Testing**: Direct integration with ESP32 and Cortex-M development boards
-- **Energy Profiling**: Real-time power consumption monitoring and optimization tools
+| Class | Description |
+|-------|-------------|
+| `EventCameraSimulator` | Simulate a Dynamic Vision Sensor (DVS): emit `(x, y, polarity, timestamp)` events from consecutive grayscale frames |
+| `NeuromorphicDataset` | Generate synthetic event-stream datasets for training/evaluation |
+| `LiquidStateNetwork` | Echo-state / liquid state reservoir with fixed random reservoir + trainable linear readout |
+| `EmbeddedProfiler` | Estimate parameter count, memory footprint (bytes), and Cortex-M clock cycles |
+| `CHeaderExporter` | Export weight matrices as C header files for on-device inference |
 
 ## Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/liquid-vision-sim-kit.git
-cd liquid-vision-sim-kit
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Install development dependencies (optional)
-pip install -r requirements-dev.txt
+pip install numpy
+pip install -e .
 ```
 
 ## Quick Start
 
-### 1. Generate Synthetic Event Data
-
 ```python
-from liquid_vision import EventSimulator, SceneGenerator
-
-# Create a scene with moving objects
-scene = SceneGenerator.create_scene(
-    num_objects=10,
-    motion_type="circular",
-    duration_ms=1000
+import numpy as np
+from liquid_vision_sim_kit import (
+    EventCameraSimulator,
+    NeuromorphicDataset,
+    LiquidStateNetwork,
+    EmbeddedProfiler,
+    CHeaderExporter,
 )
 
-# Simulate event camera output
-simulator = EventSimulator(
-    resolution=(640, 480),
-    contrast_threshold=0.15
-)
+# 1. Simulate event camera output
+sim = EventCameraSimulator()
+frame1 = np.random.rand(128, 128)
+frame2 = np.random.rand(128, 128)
+events = sim.generate_events(frame1, frame2, threshold=0.1)
+print(f"Generated {len(events)} events")
 
-events = simulator.simulate(scene)
-```
+# 2. Build a synthetic dataset
+dataset = NeuromorphicDataset(n_frames=50, height=32, width=32, seed=42)
+print(f"Dataset size: {len(dataset)} sequences")
 
-### 2. Train a Liquid Neural Network
+# 3. Train a Liquid State Network
+lsn = LiquidStateNetwork(input_dim=4, reservoir_size=256, output_dim=2)
+X_train = [dataset[i] for i in range(len(dataset))]
+y_train = np.random.randint(0, 2, len(dataset)).astype(float)
+lsn.fit_readout(X_train, y_train)
 
-```python
-from liquid_vision import LiquidNet, EventDataLoader
+# 4. Inference
+output = lsn.forward(dataset[0])
+print(f"Output: {output}")
 
-# Initialize the network
-model = LiquidNet(
-    input_dim=2,  # x, y coordinates
-    hidden_units=[32, 16],
-    output_dim=10,  # number of classes
-    tau=10.0  # time constant
-)
+# 5. Profile for embedded deployment
+profiler = EmbeddedProfiler()
+model_dict = {"W_in": lsn.W_in, "W_res": lsn.W_res, "W_out": lsn.W_out}
+stats = profiler.profile(model_dict)
+print(stats)
 
-# Load your event data
-dataloader = EventDataLoader(
-    events_path="data/events.h5",
-    batch_size=32,
-    time_window=50  # ms
-)
-
-# Train the model
-trainer = LiquidTrainer(
-    model=model,
-    device="cuda",
-    quantization_aware=True
-)
-
-trainer.fit(dataloader, epochs=100)
-```
-
-### 3. Deploy to Edge Device
-
-```python
-from liquid_vision import EdgeDeployer
-
-# Export for ESP32
-deployer = EdgeDeployer(target="esp32")
-deployer.export_model(
-    model,
-    output_path="firmware/liquid_model.c",
-    optimize_memory=True
-)
-
-# Generate test firmware
-deployer.generate_test_firmware(
-    model_path="firmware/liquid_model.c",
-    test_data=events[:1000]
-)
+# 6. Export weights as C header
+exporter = CHeaderExporter()
+exporter.export(model_dict, "model_weights.h")
 ```
 
 ## Architecture
 
+### EventCameraSimulator
+
+Computes pixel-wise frame difference and emits binary events:
+
 ```
-liquid-vision-sim-kit/
-├── liquid_vision/
-│   ├── core/
-│   │   ├── liquid_neurons.py      # LNN cell implementations
-│   │   ├── event_encoding.py      # Spike encoding schemes
-│   │   └── temporal_dynamics.py   # ODE solvers for liquid states
-│   ├── simulation/
-│   │   ├── camera_models.py       # DVS/DAVIS simulators
-│   │   ├── scene_generator.py     # Synthetic scene creation
-│   │   └── noise_models.py        # Realistic sensor noise
-│   ├── training/
-│   │   ├── liquid_trainer.py      # Training loops
-│   │   ├── quantization.py        # QAT implementations
-│   │   └── losses.py              # Temporal loss functions
-│   └── deployment/
-│       ├── edge_compiler.py       # Model compilation
-│       ├── memory_optimizer.py    # Memory footprint reduction
-│       └── firmware_generator.py  # C code generation
-├── examples/
-│   ├── gesture_recognition/       # Hand gesture classification
-│   ├── optical_flow/              # Motion estimation
-│   └── object_tracking/           # Real-time tracking
-├── benchmarks/
-│   ├── energy_profiling.py        # Power consumption tests
-│   ├── latency_tests.py           # Inference speed benchmarks
-│   └── accuracy_comparison.py     # LNN vs CNN comparisons
-└── hardware/
-    ├── esp32/                     # ESP32 firmware templates
-    └── cortex_m/                  # ARM Cortex-M examples
+event = (x, y, polarity, timestamp)
+  polarity = +1  if frame2[y,x] - frame1[y,x] >  threshold
+  polarity = -1  if frame2[y,x] - frame1[y,x] < -threshold
 ```
 
-## Benchmarks
+### LiquidStateNetwork
 
-| Model | Task | Accuracy | Energy (mJ) | Latency (ms) | Parameters |
-|-------|------|----------|-------------|--------------|------------|
-| LNN-Tiny | Gesture Recognition | 92.3% | 0.45 | 2.1 | 1.2K |
-| LNN-Base | Optical Flow | 87.6% | 1.2 | 5.3 | 8.5K |
-| CNN-Baseline | Gesture Recognition | 93.1% | 4.8 | 8.7 | 45K |
+Echo-state network with echo-state property guaranteed by scaling spectral radius of `W_res` to < 1:
 
-## Advanced Usage
-
-### Custom Liquid Neurons
-
-```python
-from liquid_vision import LiquidNeuron, register_neuron
-
-@register_neuron("adaptive_liquid")
-class AdaptiveLiquidNeuron(LiquidNeuron):
-    def __init__(self, tau_range=(5, 50)):
-        super().__init__()
-        self.tau_adapter = nn.Linear(1, 1)
-        self.tau_range = tau_range
-    
-    def forward(self, x, hidden, dt=1.0):
-        # Adaptive time constant based on input statistics
-        tau = self.tau_adapter(x.std().unsqueeze(-1))
-        tau = torch.sigmoid(tau) * (self.tau_range[1] - self.tau_range[0]) + self.tau_range[0]
-        
-        # Liquid state dynamics
-        dhdt = (-hidden + torch.tanh(self.W_in @ x + self.W_rec @ hidden)) / tau
-        hidden = hidden + dt * dhdt
-        
-        return hidden
+```
+state[t+1] = tanh(W_res @ state[t] + W_in @ event[t])
+output     = W_out @ state[-1]
 ```
 
-### Hardware Profiling
+Readout is trained via least-squares pseudo-inverse:
 
-```python
-from liquid_vision import HardwareProfiler
-
-profiler = HardwareProfiler(
-    device="esp32-s3",
-    port="/dev/ttyUSB0"
-)
-
-# Profile model on actual hardware
-results = profiler.profile_model(
-    model_path="firmware/liquid_model.bin",
-    test_duration_s=60,
-    measure_power=True
-)
-
-print(f"Average power: {results['avg_power_mw']:.2f} mW")
-print(f"Peak memory: {results['peak_memory_kb']:.1f} KB")
-print(f"Inference FPS: {results['fps']:.1f}")
+```
+W_out = (y^T S)(S^T S)^{-1}
 ```
 
-## Contributing
+### Embedded Deployment
 
-We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
+The `EmbeddedProfiler` estimates:
+- **param_count**: total float32 parameters
+- **memory_bytes**: `param_count × 4`
+- **cortex_m_cycles**: `ceil(param_count / ops_per_cycle)`
 
-### Development Setup
+The `CHeaderExporter` generates a `.h` file with `static const float` arrays ready for inclusion in C/C++ firmware.
+
+## Testing
 
 ```bash
-# Install pre-commit hooks
-pre-commit install
-
-# Run tests
-pytest tests/
-
-# Run benchmarks
-python -m benchmarks.run_all --device cuda
-
-# Build documentation
-cd docs && make html
+python -m pytest tests/ -v
 ```
 
-## Citation
+## Requirements
 
-If you use this toolkit in your research, please cite:
-
-```bibtex
-@software{liquid_vision_sim_kit,
-  title = {Liquid Vision Sim-Kit: Neuromorphic Dataset Generation and Training for Edge Devices},
-  author = {Daniel Schmidt},
-  year = {2025},
-  url = {https://github.com/danieleschmidt/liquid-vision-sim-kit}
-}
-```
-
-## References
-
-- Hasani et al. (2024). "Liquid AI: Efficient Continuous-Time Neural Networks" - WIRED
-- Event Camera Survey (2024). "Neuromorphic Vision: Progress and Challenges"
-- TinyML Foundation (2025). "Edge AI Deployment Best Practices"
+- Python ≥ 3.10
+- NumPy ≥ 1.21
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- Liquid AI team for pioneering work on LNNs
-- Event-based Vision Community for dataset standards
-- ESP32 and ARM communities for edge deployment tools
+MIT
